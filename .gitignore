@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+
+# QGIS
+*.log
+
+# IDE
+.idea/
+.vscode/
+
+# System
+.DS_Store
+Thumbs.db
+
+# Qt
+*.o
+*.so
+
+# 临时测试文件
+test/
+temp/

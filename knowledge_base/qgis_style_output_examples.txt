@@ -1,0 +1,390 @@
+【示例1：简单按用户需求设置样式】
+用户输入: "将湖泊图层，设置为边界为深蓝色，中间为浅蓝色。"
+现有图层: ["湖北省水系", "武汉市湖泊", "武汉市土地利用", "湖北省", "武汉市", "武汉大学", "武汉市自然用地", "洪山区地铁站"]
+【样式字典填写解析：用户要求为简单设置颜色，只需修改颜色相关键值对，其余保持默认即可。根据用户描述可以推断湖泊为面图层，所以正确填写fill_color与outline_color。】
+输出 JSON:
+{
+	"layer_name_input": "武汉市湖泊",
+	"style_type": "single",
+	"style_config":{
+		"field_intend": [],
+		"edit_style_config":{},
+		"categories_config":{},
+		"graduated_config":{},
+		"annotation_config":{},
+		"raster_config":{},
+		"symbol_layer_params":{
+			"marker_type": "simple",
+			"name": "circle",
+			"svg_path": "",
+			"size": 3.0,
+			"angle": 0.0,
+			"line_width": 0.6,
+			"line_color": "#000000",
+			"pen_style": "solid",
+			"cap_style": "square",
+			"join_style": "bevel",
+			"fill_color": "#E6FFFF",
+			"fill_style": "solid",
+			"outline_color": "#00FFFF",
+			"outline_width": 0.2,
+			"outline_style": "solid"				
+		}
+	}
+}
+
+
+
+【示例2：具有一定推理能力的智能体自动设置样式】
+用户输入: "给水系图层设置合适的样式。"
+现有图层: ["湖北省水系", "武汉市湖泊", "武汉市土地利用", "湖北省", "武汉市", "武汉大学", "武汉市自然用地", "洪山区地铁站"]
+【样式字典填写解析：用户并未给出具体的样式设置要求，需要利用LLM进行推理。由于水系图层有可能是线图层或面图层，因此此处将line_color、fill_color、outline_color均进行填写，其余参数保持默认。填写时要符合实际地理实体普遍表达方式。】
+输出 JSON:
+{
+	"layer_name_input": "湖北省水系",
+	"style_type": "single",
+	"style_config":{
+		"field_intend": [],
+		"edit_style_config":{},
+		"categories_config":{},
+		"graduated_config":{},
+		"annotation_config":{},
+		"raster_config":{},
+		"symbol_layer_params":{
+			"marker_type": "simple",
+			"name": "circle",
+			"svg_path": "",
+			"size": 3.0,
+			"angle": 0.0,
+			"line_width": 0.6,
+			"line_color": "#00FFFF",
+			"pen_style": "solid",
+			"cap_style": "square",
+			"join_style": "bevel",
+			"fill_color": "#E6FFFF",
+			"fill_style": "solid",
+			"outline_color": "#00FFFF",
+			"outline_width": 0.2,
+			"outline_style": "solid"			
+		}
+	}
+}
+
+
+
+【示例3：分类字段及各分类值清晰的分类样式】
+用户输入: "将"土地利用"图层根据"用途"字段进行分类，其中住宅区设为黄色，商业区设为红色。"
+现有图层: ["湖北省水系", "武汉市湖泊", "武汉市土地利用", "湖北省", "武汉市", "武汉大学", "武汉市自然用地", "洪山区地铁站"]
+【样式字典填写解析：用户要求为分类设置样式，且已具体给出各分类值的样式，categories_attribute保持默认设置，categories_data按照要求填写即可。】
+输出 JSON:
+{
+	"layer_name_input": "武汉市土地利用",
+	"style_type": "categorized",
+	"style_config":{
+		"field_intend": ["Type", "Land_use_type", "Land_use_pattern", "Land_use"],
+		"edit_style_config":{},
+		"categories_config":{
+			"categories_attribute": "color",
+			"categories_data":[
+				{"value":  "住宅区", 
+				 "symbol_params": { 			
+			 		"marker_type": "simple",
+					"name": "circle",
+					"svg_path": "",
+					"size": 3.0,
+					"angle": 0.0,
+					"line_width": 0.6,
+					"line_color": "#000000",
+					"pen_style": "solid",
+					"cap_style": "square",
+					"join_style": "bevel",
+					"fill_color": "#FFFF00",
+					"fill_style": "solid",
+					"outline_color": "#000000",
+					"outline_width": 0.2,
+					"outline_style": "solid"}
+				},
+				{"value":  "商业区", 
+				 "symbol_params": { 			
+			 		"marker_type": "simple",
+					"name": "circle",
+					"svg_path": "",
+					"size": 3.0,
+					"angle": 0.0,
+					"line_width": 0.6,
+					"line_color": "#000000",
+					"pen_style": "solid",
+					"cap_style": "square",
+					"join_style": "bevel",
+					"fill_color": "#FF0000",
+					"fill_style": "solid",
+					"outline_color": "#000000",
+					"outline_width": 0.2,
+					"outline_style": "solid"}
+				}
+			]
+		},
+		"graduated_config":{},
+		"annotation_config":{},
+		"raster_config":{},
+		"symbol_layer_params":{}
+	}
+}
+
+
+
+【示例4：分类字段及各分类值不清晰的分类样式】
+用户输入: "将武汉市行政区图层按照不同区县进行分类设色。"
+现有图层: ["湖北省水系", "武汉市湖泊", "武汉市土地利用", "湖北省", "武汉市", "武汉大学", "武汉市自然用地", "洪山区地铁站"]
+【样式字典填写解析：用户要求为分类设置样式，但未明确指出分类依据字段，故需要根据用户描述推理可能的字段名称，填写入field_intend中。此时categories_config不为空，根据语意选择合适的分类属性（这里根据语意选择了color），提示后端处理后添加。categories_data为空，等待后端处理。symbol_layer_params保持默认即可。】
+输出 JSON:
+{
+	"layer_name_input": "武汉市",
+	"style_type": "categorized",
+	"style_config":{
+		"field_intend": ["County", "Name", "County_name", "Administrative_region", "District_name"],
+		"edit_style_config":{},
+		"categories_config":{
+			"categories_attribute": "color",
+			"categories_data":[]
+		},
+		"graduated_config":{},
+		"annotation_config":{},
+		"raster_config":{},
+		"symbol_layer_params":{
+			"marker_type": "simple",
+			"name": "circle",
+			"svg_path": "",
+			"size": 3.0,
+			"angle": 0.0,
+			"line_width": 0.6,
+			"line_color": "#000000",
+			"pen_style": "solid",
+			"cap_style": "square",
+			"join_style": "bevel",
+			"fill_color": "#CCCCCC",
+			"fill_style": "solid",
+			"outline_color": "#000000",
+			"outline_width": 0.2,
+			"outline_style": "solid"					
+		}
+	}
+}
+
+
+
+【示例5：分级样式】
+用户输入: "将湖北省行政区图层按照GDP进行分级渲染"
+现有图层: ["湖北省水系", "武汉市湖泊", "武汉市土地利用", "湖北省", "武汉市", "武汉大学", "武汉市自然用地", "洪山区地铁站"]
+【样式字典填写解析：用户要求为分级设置样式，因此需要填写graduated_config。如未指定，classification_method、classes_count和symbol_scale_attributem均保持默认设置。由于默认为颜色分级，所以需要LLM根据语意自动设置一组渐变起终颜色。symbol_params全部保持默认设置即可，待后端处理。】
+输出 JSON:
+{
+	"layer_name_input": "湖北省",
+	"style_type": "graduated",
+	"style_config":{
+		"field_intend": ["GDP"],
+		"edit_style_config":{},
+		"categories_config":{},
+		"graduated_config":{
+			"classification_method": "Quantile",
+			"classes_count": 5,
+			"symbol_scale_attribute": "color",
+			"ramp_colors": ["#FFD6D6", "#FF0000"],
+			"ramp_size": [],
+			"ramp_width": [],
+			"symbol_params":{ 			
+				"marker_type": "simple",
+				"name": "circle",
+				"svg_path": "",
+				"size": 3.0,
+				"angle": 0.0,
+				"line_width": 0.6,
+				"line_color": "#000000",
+				"pen_style": "solid",
+				"cap_style": "square",
+				"join_style": "bevel",
+				"fill_color": "#CCCCCC",
+				"fill_style": "solid",
+				"outline_color": "#000000",
+				"outline_width": 0.2,
+				"outline_style": "solid"
+			}
+		},
+		"annotation_config":{},
+		"raster_config":{},
+		"symbol_layer_params":{}
+	}
+}
+
+
+
+【示例6：复杂分类样式】
+用户输入: "将湖北省河流按照河流等级设置不同的粗细，并配置合适的颜色。"
+现有图层: ["湖北省水系", "武汉市湖泊", "武汉市土地利用", "湖北省", "武汉市", "武汉大学", "武汉市自然用地", "洪山区地铁站"]
+【样式字典填写解析：用户要求为分类设置样式，因此需要填写categories_config。且用户明确指出“设置不同的粗细”，因此categories_attribute选择width，又没有具体说明哪些分类值，所以categories_data留空。同时用户要求“配置合适的颜色”，因此在symbol_layer_params所有参数保持默认的前提下，需要根据语意自动生成一个合适的颜色修改线颜色的相关配置，所以line_color设置为 "#00FFFF"】
+输出 JSON:
+{
+	"layer_name_input": "湖北省河流",
+	"style_type": "categorized",
+	"style_config":{
+		"field_intend": ["Class", "Grade", "Level", "River_class", "River_grade", "River_level"],
+		"edit_style_config":{},
+		"categories_config":{
+			"categories_attribute": "width",
+			"categories_data": []
+		},
+		"graduated_config":{},
+		"annotation_config":{},
+		"raster_config":{},
+		"symbol_layer_params":{
+			"marker_type": "simple",
+			"name": "circle",
+			"svg_path": "",
+			"size": 3.0,
+			"angle": 0.0,
+			"line_width": 0.6,
+			"line_color": "#00FFFF",
+			"pen_style": "solid",
+			"cap_style": "square",
+			"join_style": "bevel",
+			"fill_color": "#CCCCCC",
+			"fill_style": "solid",
+			"outline_color": "#000000",
+			"outline_width": 0.2,
+			"outline_style": "solid"					
+		}
+	}
+}
+
+
+
+【示例7：注记添加要求】
+用户输入: "为湖北省各行政区添加注记"
+现有图层: ["湖北省水系", "武汉市湖泊", "武汉市土地利用", "湖北省", "武汉市", "武汉大学", "武汉市自然用地", "洪山区地铁站"]
+【样式字典填写解析：用户需求为添加注记，因此填写annotation_config, 根据语意，预判为面图层，因此mode选择horizontal（在面中心水平放置），其余参数保持默认设置。根据语意，填写field_intend字段。】
+输出 JSON:
+{
+	"layer_name_input": "湖北省",
+	"style_type": "annotation",
+	"style_config":{
+		"field_intend": ["City", "Name", "City_name"],
+		"edit_style_config":{},
+		"categories_config":{},
+		"graduated_config":{},
+		"annotation_config":{
+		   	"font_family": "Microsoft YaHei",
+			"font_size": 10.0,
+			"font_color": "#000000",
+			"is_bold": false,
+			"is_italic": false,
+			"draw_buffer": false,
+			"buffer_size": 1.0,
+			"buffer_color": "#FFFFFF",
+			"mode": "horizontal",
+			"offset_xy": [0.0, 0.0]
+		},
+		"raster_config":{},
+		"symbol_layer_params":{}
+	}
+}
+
+
+
+【示例8：典型修改需求】
+用户输入: "把武汉大学图层的颜色搞浅一点点。"
+现有图层: ["湖北省水系", "武汉市湖泊", "武汉市土地利用", "湖北省", "武汉市", "武汉大学", "武汉市自然用地", "洪山区地铁站"]
+【样式字典填写解析：识别到需要对现有图层样式进行修改，因此填写edit_style_config，根据用户输入填写其中的参数。由于是简单修改需求，edit_scope根据语意选择一项填入。】
+输出 JSON:
+{
+    "layer_name_input": "武汉大学",
+    "style_type": "single",
+    "style_config": {
+        "field_intend": [],
+        "edit_style_config": {
+            "edit_intent": "lighter",
+            "edit_scope": ["fill_color"],
+            "edit_strength": "slight"
+        },
+        "categories_config": {},
+        "graduated_config": {},
+        "annotation_config": {},
+		"raster_config":{},
+        "symbol_layer_params": {}
+    }
+}
+
+
+
+【示例9：模糊修改需求】
+用户输入: "把地铁站图层搞得显眼一点。"
+现有图层: ["湖北省水系", "武汉市湖泊", "武汉市土地利用", "湖北省", "武汉市", "武汉大学", "武汉市自然用地", "洪山区地铁站"]
+【样式字典填写解析：识别到需要对现有图层样式进行修改，因此填写edit_style_config，根据用户输入填写其中的参数。由于是模糊需求，根据语意猜测目标图层的地理类型为点图层，根据点图层可能拥有的属性，edit_scope选择fill_color、line_color和size填入。】
+输出 JSON:
+{
+    "layer_name_input": "洪山区地铁站",
+    "style_type": "single",
+    "style_config": {
+        "field_intend": [],
+        "edit_style_config": {
+            "edit_intent": "more_prominent",
+            "edit_scope": ["fill_color", "outline_color", "size"],
+            "edit_strength": "medium"
+        },
+        "categories_config": {},
+        "graduated_config": {},
+        "annotation_config": {},
+		"raster_config":{},
+        "symbol_layer_params": {}
+    }
+}
+
+
+【示例10：栅格图层-DEM 最佳实践渲染】
+用户输入: "把这个DEM图层渲染得好看一点，要有地形起伏感。"
+现有图层: ["武汉市DEM"] (类型: 栅格)
+【样式字典填写解析：用户希望对DEM进行高质量渲染。raster_type选择pseudocolor（伪彩色）。为了表现地形起伏感，classification_mode选择quantile（分位数）以增强对比度，并配合invert_ramp=true（反转色带）和RdYlGn色带，使高处呈现红色。】
+输出 JSON:
+{
+	"layer_name_input": "武汉市DEM",
+	"style_type": "raster",
+	"style_config":{
+		"field_intend": [],
+		"edit_style_config":{},
+		"categories_config":{},
+		"graduated_config":{},
+		"annotation_config":{},
+        "raster_config": {
+            "raster_type": "pseudocolor",
+            "band_no": 1,
+            "color_ramp_name": "RdYlGn",
+            "invert_ramp": true,
+            "interpolation": "linear",
+            "classification_mode": "quantile",
+            "classes_count": 5
+        },
+        "symbol_layer_params":{}
+	}
+}
+
+
+【示例11：栅格图层-土地利用唯一值】
+用户输入: "这个图是土地利用栅格，请按唯一值渲染，不要渐变。"
+现有图层: ["LandCover_Raster"] (类型: 栅格)
+【样式字典填写解析：用户明确要求“唯一值渲染”。raster_type选择unique。为了区分不同地类，选择Spectral色带。由于是离散数据，插值方式interpolation设为exact（精确）。】
+输出 JSON:
+{
+	"layer_name_input": "LandCover_Raster",
+	"style_type": "raster",
+	"style_config":{
+		"field_intend": [],
+		"edit_style_config":{},
+		"categories_config":{},
+		"graduated_config":{},
+		"annotation_config":{},
+		"symbol_layer_params":{},
+        "raster_config": {
+            "raster_type": "unique",
+            "band_no": 1
+        }
+	}
+}
