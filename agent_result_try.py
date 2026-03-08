@@ -1,5 +1,5 @@
 import logging
-from agent_prompts import agent_a_prompt, agent_b_prompt, agent_c_prompt
+from prompts import agent_a_prompt, agent_b_prompt, agent_c_prompt
 
 from camel.agents import ChatAgent
 from camel.messages import BaseMessage
