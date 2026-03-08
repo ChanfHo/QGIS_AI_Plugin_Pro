@@ -17,7 +17,7 @@ from .fetch_data import execute_fetch_task, get_catalog_for_prompt
 from .spatial_process import execute_geoprocessing_task
 from .style_management import set_layer_style
 from .retrieve_style_config import retrieve_style_config
-from .agent_prompts import agent_a_prompt, agent_b_prompt, agent_c_prompt, agent_d_prompt, agent_e_prompt
+from .prompts import agent_a_prompt, agent_b_prompt, agent_c_prompt, agent_d_prompt, agent_e_prompt
 from .project_management import execute_project_task
 
 # --- 配置 ---
