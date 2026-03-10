@@ -16,7 +16,7 @@ API_KEY = "sk-a2cddd46f8924031b2888c97c73c6e43"
 MODEL_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 MODEL_NAME = "qwen-plus"
 
-USER_REQUEST = "绘制一幅南宁市普通地图。"
+USER_REQUEST = "统计区域内地铁站1000m范围内的奶茶店数量，并根据数量多少配置样式"
 
 
 # ==============================
@@ -51,19 +51,34 @@ def safe_json_loads(text):
     text = text.strip()
 
     # 去掉markdown
-    text = text.replace("```json", "")
-    text = text.replace("```", "")
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0]
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0]
+    
+    text = text.strip()
 
-    # 提取JSON
-    match = re.search(r'\[.*\]', text, re.S)
+    # 尝试直接解析
+    try:
+        return json.loads(text)
+    except:
+        pass
 
-    if match:
-        return json.loads(match.group())
-
+    # 提取JSON - 优先匹配对象 {}，因为通常最外层是对象
+    # 原始代码优先匹配 [] 导致如果对象中包含数组，会提取出内部数组而不是外部对象
     match = re.search(r'\{.*\}', text, re.S)
-
     if match:
-        return json.loads(match.group())
+        try:
+            return json.loads(match.group())
+        except:
+            pass
+
+    match = re.search(r'\[.*\]', text, re.S)
+    if match:
+        try:
+            return json.loads(match.group())
+        except:
+            pass
 
     raise Exception(f"无法解析JSON: {text}")
 
@@ -112,14 +127,15 @@ def task_planner_node(state: GraphState):
 
     try:
         parsed_result = safe_json_loads(result)
+
+        print(Fore.BLUE + f"LLM 原始返回: {parsed_result}")
         
         # 处理新的返回结构 (包含 thought 和 plan)
-        if isinstance(parsed_result, dict) and "thought" in parsed_result and "plan" in parsed_result:
+        if "thought" in parsed_result and "plan" in parsed_result:
             print(Fore.YELLOW + "\n[Task Planner 思考过程]")
             print(Fore.WHITE + parsed_result["thought"])
             task_plan = parsed_result["plan"]
         else:
-            # 兼容旧格式（如果是直接返回列表）
             task_plan = parsed_result
             
     except Exception as e:
@@ -161,6 +177,7 @@ def task_router_node(state: GraphState):
 
     state["assigned_agent"] = agent
     state["current_task"] = task
+    state["current_step"] = state["task_plan"][step]["step"]
 
     print(Fore.GREEN + "TaskRouter 选择 Agent：")
 
@@ -204,7 +221,7 @@ def check_continuation(state: GraphState):
     step = state["current_step"]
     plan = state["task_plan"]
 
-    if plan[step]["is_last_step"]:
+    if plan[step-1]["is_last_step"]:
         print(Fore.WHITE + "\nWorkflow结束：所有任务执行完成")
         return END
 
@@ -213,7 +230,6 @@ def check_continuation(state: GraphState):
 
 def update_step_node(state: GraphState):
 
-    state["current_step"] += 1
     plan = state["task_plan"]
     next_task = plan[state["current_step"]]["task"]
     state["current_task"] = next_task
