@@ -15,15 +15,11 @@ from PyQt5.QtGui import QFont, QPainter, QPainterPath, QColor, QPixmap, QIcon
 from qgis.utils import iface
 from qgis.core import QgsProject, Qgis
 
-from camel.societies import RolePlaying
-from camel.models import ModelFactory
-from camel.types import ModelPlatformType
-
 from .chat_model import chat_with_openai
-from .agents import (run_agent_a, run_agent_b, run_agent_c, run_agent_d, run_agent_e)
 from .project_management import execute_project_task
 from .layout_management import execute_layout_task
 from .hotword_manager import QGISHotwordManager
+from .workflow_graph import create_workflow_graph
 
 INITIAL_MESSAGE = ("你好！我是你的QGIS智能AI助手，你可以向我提出用QGIS进行的任何操作。例如，你可以对我说：\n"
                    "1.将河流图层的样式设置为蓝色；\n"
@@ -222,7 +218,7 @@ class ProcessBubble(QWidget):
 # ---创建智能体工作小组处理工作线程---
 class AgentsWorkgroupThread(QThread):
     """
-        负责在后台运行的 CAMEL Agent 工作小组逻辑
+        负责在后台运行的 LangGraph 工作小组逻辑
     """
     # 消息信号: (text, sender, msg_type)
     # sender: "user", "ai"
@@ -239,6 +235,8 @@ class AgentsWorkgroupThread(QThread):
     execute_project_signal = pyqtSignal(str, dict)
     # 用于传递布局任务列表的信号
     layout_task_signal = pyqtSignal(list)
+    # 停止信号
+    stop_signal = pyqtSignal()
 
     def __init__(self, user_text, layers, parent=None):
         super().__init__(parent)
@@ -246,222 +244,127 @@ class AgentsWorkgroupThread(QThread):
         self.layers = layers
         # 用于接收主线程执行结果的变量
         self.project_op_result = None
-        # 这里应该传入配置参数，确保模型能在线程中初始化
-        self.api_key = API_KEY
-        self.model_type = MODEL_TYPE
-        self.model_url = MODEL_URL
-        self.round_limit = ROUND_LIMIT
+        self._is_stopped = False
+
+    def stop(self):
+        """停止线程任务"""
+        self._is_stopped = True
+        self.stop_signal.emit()
+
+    # 供 LangGraph Node 调用的执行器方法
+    def execute_project_op(self, source_type, query_params):
+        """执行项目操作（需在主线程运行）"""
+        if self._is_stopped: return "任务已停止"
+        
+        self.project_op_result = None
+        self.execute_project_signal.emit(source_type, query_params)
+        
+        # 阻塞等待结果
+        while self.project_op_result is None:
+            if self._is_stopped: return "任务已停止"
+            self.msleep(50)
+            
+        return self.project_op_result
+
+    def execute_layout_op(self, tasks):
+        """执行布局操作（需在主线程运行）"""
+        if self._is_stopped: return "任务已停止"
+        
+        # 发送布局任务信号
+        self.layout_task_signal.emit(tasks)
+        
+        return "布局任务已发送至主线程执行。"
+        
+    def refresh_layers(self):
+        """刷新并返回最新的图层列表"""
+        if self._is_stopped: return []
+        # 触发主线程刷新（UI）
+        self.refresh_map_canvas_signal.emit()
+        # 获取最新图层（注意：QgsProject 实例在多线程访问可能不安全，但读取通常还好）
+        self.layers = list(QgsProject.instance().mapLayers().values())
+        return self.layers
 
     # 运行智能体工作小组
     def run(self):
-        # ---设置日志级别，避免CAMEL框架内部打印过多警告---
-        logging.getLogger("camel").setLevel(logging.WARNING)
+        # 创建 Workflow Graph
+        app = create_workflow_graph()
 
-        # ---模型初始化---
+        # 初始状态
+        inputs = {
+            "user_request": self.user_text,
+            "layers": self.layers,
+            "task_plan": [],
+            "current_step": 0,
+            "current_task": "",
+            "assigned_agent": "",
+            "execution_result": None,
+            "error": "",
+            "is_gis_task": True,
+            "executor": self
+        }
+
         try:
-            model = ModelFactory.create(
-                model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
-                model_type=self.model_type,
-                url=self.model_url,
-                api_key=self.api_key
-            )
-        except Exception as e:
-            # 处理ModelFactory创建失败的情况
-            self.error_signal.emit(f"模型创建失败，启用备用模型。失败原因：{e}")
-            model = None  # 实际运行需要一个可用的模型
-
-        # ---构建RolePlaying对象---
-        # 任务参数
-        task_kwargs = {
-            'task_prompt': self.user_text,
-            'with_task_specify': False,
-            'output_language': 'zh'
-        }
-
-        # GIS Assistant (Assistant) 参数
-        assistant_role_kwargs = {
-            'assistant_role_name': 'GIS Assistant',
-            'assistant_agent_kwargs': {'model': model}
-        }
-
-        # GIS Planner (User) 参数
-        user_role_kwargs = {
-            'user_role_name': 'GIS Planner',
-            'user_agent_kwargs': {'model': model}
-        }
-
-        # 创建RolePlaying实例:QGIS-AI工作小组
-        agents_workgroup = RolePlaying(
-            **task_kwargs,  # 任务参数
-            **assistant_role_kwargs,  # GIS Assistant (Assistant) 的参数
-            **user_role_kwargs,  # GIS Planner (User) 的参数
-        )
-
-        # ---开始运行工作小组---
-        input_msg = agents_workgroup.init_chat()
-        try:
-            for i in range(ROUND_LIMIT):
-                # ---获取planner和assistant的输出---
-                assistant_response, planner_response = agents_workgroup.step(input_msg)
-
-                if planner_response.msgs:
-                    planner_output_content = planner_response.msgs[0].content.strip()
-                else:
-                    self.error_signal.emit("Planner未生成消息")
-                    break
-
-                if assistant_response.msgs:
-                    assistant_output_content = assistant_response.msgs[0].content.strip()
-                else:
-                    self.error_signal.emit("Assistant未生成消息")
-                    break
-
-                try:
-                    planner_json = json.loads(planner_output_content)
-                    assistant_json = json.loads(assistant_output_content)
-                    # 输出 Planner 的计划作为中间步骤
-                    self.message_signal.emit(f"Planner Output:\n{planner_json}", "ai", "step")
-                except json.JSONDecodeError as e:
-                    self.error_signal.emit(f"JSON 解析失败，请检查输出格式。错误：{e}。")
-                    break
-
-                # ---进入普通聊天模式---
-                if not planner_json["is_gis_task"]:
-                    # ---普通聊天接口---
-                    ai_response = chat_with_openai(self.user_text)
+            # 使用 stream 模式运行
+            for event in app.stream(inputs):
+                if self._is_stopped:
+                    self.message_signal.emit("用户已手动停止流程。", "ai", "text")
                     self.remove_thinking_signal.emit()
-                    if "聊天接口报错:" in ai_response:
-                        self.error_signal.emit(ai_response)
-                    else:
-                        self.message_signal.emit(ai_response, "ai", "text")
-                    break
+                    return
 
-                # ---QGIS操作智能体召唤接口---
-                task = planner_json["task"]
-                agent = assistant_json["agent"]
-                self.remove_thinking_signal.emit()
-                
-                if agent in ["agent_a", "agent_b", "agent_c", "agent_d", "agent_e"]:
+                # event 是一个字典，key 是节点名，value 是该节点输出的状态更新
+                for node_name, state_update in event.items():
+                    if self._is_stopped:
+                        self.message_signal.emit("用户已手动停止流程。", "ai", "text")
+                        self.remove_thinking_signal.emit()
+                        return
+                        
+                    # 检查是否有错误
+                    if "error" in state_update and state_update["error"]:
+                        self.error_signal.emit(state_update["error"])
+                        return # 终止
 
-                    # 如果流程中只有一步
-                    if planner_json["step"] == 1 and planner_json["is_last_step"]:
-                        self.message_signal.emit(f"正在执行：{task}", "ai", "text")
-                    else:
-                        self.message_signal.emit(f"正在执行第{i+1}步：{task}", "ai", "text")
-
-                    if agent == "agent_a":
-                        # agent_a召唤接口
-                        agent_a_result = run_agent_a(task)
-                        if agent_a_result["is_process_complete"]:
-                            assistant_json["is_process_complete"] = True  # 任务已完成
-                            self.message_signal.emit(f"数据获取完成！\n详情: {agent_a_result['tool_result']}", "ai", "step")
-                        else:
-                            assistant_json["is_process_complete"] = False
-                            assistant_json["possible_problem"] = agent_a_result["possible_problem"]
-                        self.refresh_map_canvas_signal.emit()
-
-                    elif agent == "agent_b":
-                        # agent_b召唤接口
-                        agent_b_result = run_agent_b(task, self.layers)
-                        if agent_b_result["is_process_complete"]:
-                            assistant_json["is_process_complete"] = True  # 任务已完成
-                            self.message_signal.emit(f"数据处理完成！\n详情: {agent_b_result['tool_result']}", "ai", "step")
-                        else:
-                            assistant_json["is_process_complete"] = False
-                            assistant_json["possible_problem"] = agent_b_result["possible_problem"]
-                        self.refresh_map_canvas_signal.emit()
-
-                    elif agent == "agent_c":
-                        # agent_c召唤接口
-                        agent_c_result = run_agent_c(task, self.layers)
-                        if agent_c_result["is_process_complete"]:
-                            assistant_json["is_process_complete"] = True  # 任务已完成
-                            self.message_signal.emit(f"样式修改完成！\n详情: {agent_c_result['tool_result']}", "ai", "step")
-                        else:
-                            assistant_json["is_process_complete"] = False
-                            assistant_json["possible_problem"] = agent_c_result["possible_problem"]
-                        self.refresh_map_canvas_signal.emit()
-
-                    elif agent == "agent_d":
-                        # 1. 调用 Agent D 解析意图，但禁止在线程内执行 (execute=False)
-                        agent_d_plan = run_agent_d(task, execute=False)
-                        if agent_d_plan.get("is_process_complete") and agent_d_plan.get("need_execution"):
-                            # 2. 获取任务参数
-                            p_type = agent_d_plan["source_type"]
-                            p_params = agent_d_plan["query_params"]
-                            # 3. 清空结果槽，发送信号给主线程
-                            self.project_op_result = None
-                            self.execute_project_signal.emit(p_type, p_params)
-                            # 4. 阻塞等待主线程执行完毕 (轮询)
-                            # QThread 中使用 while sleep 是安全的等待方式
-                            while self.project_op_result is None:
-                                self.msleep(50)  # 等待 50ms
-                            # 5. 获取结果
-                            final_result = self.project_op_result
-                            if final_result.startswith("Success"):
-                                assistant_json["is_process_complete"] = True
-                                self.message_signal.emit(f"项目操作完成！\n详情: {final_result}", "ai", "step")
-                                # 刷新画布和更新图层列表
-                                self.refresh_map_canvas_signal.emit()
-                                # 必须在主线程操作完成后，再读取新的图层列表 (此时 project.instance() 已更新)
-                                # 注意：mapLayers() 调用是只读的，通常在线程安全，但最好也在主线程做，这里为了简单先保留
-                                self.layers = list(QgsProject.instance().mapLayers().values())
+                    # 处理 TaskPlanner 输出
+                    if node_name == "task_planner":
+                        self.remove_thinking_signal.emit()
+                        if not state_update.get("is_gis_task", True):
+                            ai_response = chat_with_openai(self.user_text)
+                            if "聊天接口报错:" in ai_response:
+                                self.error_signal.emit(ai_response)
                             else:
-                                assistant_json["is_process_complete"] = False
-                                assistant_json["possible_problem"] = final_result
-                        elif not agent_d_plan["is_process_complete"]:
-                            # 解析阶段就出错了
-                            assistant_json["is_process_complete"] = False
-                            assistant_json["possible_problem"] = agent_d_plan["possible_problem"]
+                                self.message_signal.emit(ai_response, "ai", "text")
+                            return # 结束
 
-                    elif agent == "agent_e":
-                        # 调用 Agent E (只解析，不执行)
-                        agent_e_result = run_agent_e(task, self.layers)
-                        if agent_e_result["is_process_complete"]:
-                            assistant_json["is_process_complete"] = True
-                            # 发射信号给主线程
-                            tasks = agent_e_result.get("tasks", [])
-                            if tasks:
-                                self.layout_task_signal.emit(tasks)
-                                self.message_signal.emit("正在主线程执行视图操作...", "ai", "step")
-                            else:
-                                self.message_signal.emit("AI未生成有效操作。", "ai", "step")
+                        task_plan = state_update.get("task_plan", [])
+                        
+                        # 显示计划
+                        self.message_signal.emit(f"Planner Output:\n{json.dumps(task_plan, indent=2, ensure_ascii=False)}", "ai", "step")
+
+                    # 处理 TaskRouter 输出
+                    elif node_name == "task_router":
+                        task = state_update.get("current_task")
+                        step_idx = state_update.get("current_step", 0)
+                        # 显示正在执行
+                        self.message_signal.emit(f"正在执行第{step_idx+1}步：{task}", "ai", "text")
+
+                    # 处理 AgentExecutor 输出
+                    elif node_name == "agent_executor":
+                        result = state_update.get("execution_result", {})
+                        if result.get("is_process_complete"):
+                            tool_result = result.get("tool_result", "完成")
+                            self.message_signal.emit(f"步骤执行完成！\n详情: {tool_result}", "ai", "step")
+                            self.refresh_map_canvas_signal.emit()
                         else:
-                            assistant_json["is_process_complete"] = False
-                            assistant_json["possible_problem"] = agent_e_result["possible_problem"]
-                else:
-                    self.error_signal.emit("未检测到正确的agent格式")
-
-                # ---准备下一轮的输入消息 (由Planner发送给Assistant)---
-                if assistant_json["is_process_complete"]:
-
-                    # 如果流程中是多步的
-                    if planner_json["step"] == 1 and planner_json["is_last_step"]:
-                        pass
-                    else:
-                        self.message_signal.emit(f"第{i+1}步步骤执行成功！", "ai", "text")
-
-                    input_msg = json.dumps(assistant_json, ensure_ascii=False) + "请进行下一个任务"
-                else:
-                    # 该步骤未完成，需要和Assistant交流，让它进行相应处理
-                    possible_problem = assistant_json["possible_problem"]
-                    input_msg = json.dumps(assistant_json,
-                                           ensure_ascii=False) + f"这一个步骤未完成，因为{possible_problem}"
-
-                    # 后续需要补上任务未完成交互逻辑，这里暂时退出流程。
-                    self.error_signal.emit(f"任务“{task}”未完成，因为{possible_problem}")
-                    break
-
-                # ---检查终止条件---
-                if planner_json["is_last_step"] and assistant_json["is_process_complete"]:
-                    self.message_signal.emit("任务执行成功，流程结束！", "ai", "text")
-                    break
-
-            else:
-                self.message_signal.emit("达到轮次限制，流程终止。", "ai", "text")
+                            prob = result.get("possible_problem", "未知错误")
+                            self.message_signal.emit(f"步骤执行遇到问题: {prob}", "ai", "text")
+                            # 这里可以选择终止或继续，workflow_graph 默认会根据 conditional_edge 终止或抛错
+                            
+            # 循环结束，检查最终状态
+            if not self._is_stopped:
+                self.message_signal.emit("任务流程结束。", "ai", "text")
 
         except Exception as e:
-            self.error_signal.emit(f"流程异常终止：{e}")
+            if not self._is_stopped:
+                self.error_signal.emit(f"流程异常终止：{e}")
 
 
 class ChatBox(QObject):
@@ -479,6 +382,8 @@ class ChatBox(QObject):
         self.user_inputBox = dock_widget.user_inputBox
         self.send_button = dock_widget.send_button
         self.voice_btn = dock_widget.voice_btn
+        # 新增 stop_button 绑定
+        self.stop_button = dock_widget.stop_button
         
         # 获取 chat_container 布局 (在 .ui 中是 scrollAreaWidgetContents)
         self.chat_container = dock_widget.scrollAreaWidgetContents
@@ -512,6 +417,9 @@ class ChatBox(QObject):
         
         # 发送按钮
         self.send_button.clicked.connect(self.send_message)
+        
+        # 停止按钮
+        self.stop_button.clicked.connect(self.stop_process)
 
     def init_audio(self):
         # 初始化音频管理器
@@ -592,22 +500,42 @@ class ChatBox(QObject):
         # 3. 显示思考状态 (不使用打字机效果)
         self.ai_thinking_bubble = self.add_message("正在思考中...", "ai", typing_effect=False)
 
-        # 4. 实例化并启动工作小组工作线程
+        # 4. 更新UI状态：隐藏发送按钮，显示停止按钮
+        self.send_button.setVisible(False)
+        self.stop_button.setVisible(True)
+
+        # 5. 实例化并启动工作小组工作线程
         self.agents_workgroup = AgentsWorkgroupThread(user_text, layers)
 
-        # 5. 连接信号到槽函数
+        # 6. 连接信号到槽函数
         self.agents_workgroup.message_signal.connect(self.receive_ai_message)  # 处理消息
         self.agents_workgroup.error_signal.connect(self.process_error)  # 处理错误
         self.agents_workgroup.remove_thinking_signal.connect(self.remove_thinking_bubble)  # 移除气泡
         self.agents_workgroup.create_msg_bar_signal.connect(create_msg_bar)  # 创建消息栏
         self.agents_workgroup.finished.connect(self.agents_workgroup.deleteLater)
+        self.agents_workgroup.finished.connect(self.on_thread_finished) # 线程结束恢复UI
         self.agents_workgroup.refresh_map_canvas_signal.connect(self.refresh_map_canvas)  # 刷新地图画布
         self.agents_workgroup.execute_project_signal.connect(self.handle_project_execution)
         self.agents_workgroup.layout_task_signal.connect(self.handle_layout_tasks)
 
-        # 6. 启动线程
+        # 7. 启动线程
         self.agents_workgroup.start()
 
+    def stop_process(self):
+        """用户点击停止按钮"""
+        if self.agents_workgroup and self.agents_workgroup.isRunning():
+            self.agents_workgroup.stop()
+            # UI 更新将在 thread finished 信号中处理
+            # 但为了即时反馈，禁用按钮
+            self.stop_button.setEnabled(False)
+
+    def on_thread_finished(self):
+        """线程结束时的清理工作"""
+        self.stop_button.setVisible(False)
+        self.stop_button.setEnabled(True)
+        self.send_button.setVisible(True)
+        self.remove_thinking_bubble()
+        self.agents_workgroup = None
 
     # ---槽函数：在主线程执行项目操作---
     def handle_project_execution(self, source_type, params):
@@ -615,7 +543,8 @@ class ChatBox(QObject):
             result = execute_project_task(source_type, params)
         except Exception as e:
             result = f"Error: 主线程执行异常: {str(e)}"
-        self.agents_workgroup.project_op_result = result
+        if self.agents_workgroup:
+            self.agents_workgroup.project_op_result = result
 
     # 槽函数：在主线程安全地操作 QGIS 界面 ---
     def handle_layout_tasks(self, tasks):
@@ -624,7 +553,7 @@ class ChatBox(QObject):
             res_msg = execute_layout_task(req)
             results.append(res_msg)
         final_msg = " | ".join(results)
-        self.add_message(f"执行结果：\n{final_msg}", "ai")
+        self.add_message(f"布局操作执行结果：\n{final_msg}", "ai")
         self.refresh_map_canvas()
 
     # ---槽函数：接收线程结果---
@@ -638,7 +567,7 @@ class ChatBox(QObject):
     def process_error(self, err_msg):
         self.remove_thinking_bubble()
         create_msg_bar(err_msg, Qgis.Info)
-        self.add_message(f"任务执行出错，请检查后台消息查看错误原因。", "ai")
+        self.add_message(f"任务执行出错: {err_msg}", "ai")
 
     def remove_thinking_bubble(self):
         if self.ai_thinking_bubble:
