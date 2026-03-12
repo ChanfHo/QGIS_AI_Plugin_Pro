@@ -8,18 +8,20 @@ from .audio_manager import AudioManager
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
     QLineEdit, QPushButton, QLabel, QFrame, QTextEdit,
-    QSizePolicy, QGraphicsDropShadowEffect, QApplication
+    QSizePolicy, QGraphicsDropShadowEffect, QApplication,
+    QDialog,  QProgressBar
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QSize, QRect, QObject
 from PyQt5.QtGui import QFont, QPainter, QPainterPath, QColor, QPixmap, QIcon
 from qgis.utils import iface
 from qgis.core import QgsProject, Qgis
 
-from .chat_model import chat_with_openai
+from .chat_model import chat_with_openai, call_qwen_with_prompt
 from .project_management import execute_project_task
 from .layout_management import execute_layout_task
 from .hotword_manager import QGISHotwordManager
 from .workflow_graph import create_workflow_graph
+from .prompts import FINAL_SUMMARY_PROMPT, ERROR_REPORT_PROMPT
 
 INITIAL_MESSAGE = ("你好！我是你的QGIS智能AI助手，你可以向我提出用QGIS进行的任何操作。例如，你可以对我说：\n"
                    "1.将河流图层的样式设置为蓝色；\n"
@@ -149,70 +151,262 @@ class ChatBubble(QWidget):
         if len(self.current_text) < len(self.full_text):
             self.current_text += self.full_text[len(self.current_text)]
             self.message_label.setText(self.current_text)
-            
-            # 自动滚动到底部 (需要调用父级 ScrollArea 的滚动，这里尝试通过事件或回调)
-            # 简单的做法是让 Label 更新 geometry
             self.message_label.adjustSize()
         else:
             self.typing_timer.stop()
 
 
-
-# --- 折叠式步骤气泡 ---
-class ProcessBubble(QWidget):
-    def __init__(self, title, details, parent=None):
+# --- 思考气泡组件 (打字机效果) ---
+class ThinkingBubble(QWidget):
+    def __init__(self, text, parent=None):
         super().__init__(parent)
-        self.init_ui(title, details)
+        self.full_text = text
+        self.current_text = ""
+        self.init_ui()
+        if text and text != "正在思考中...":
+            self.start_typing()
 
-    def init_ui(self, title, details):
+    def init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(42, 2, 10, 2)
-        layout.setSpacing(5)
-
-        # 折叠按钮 (作为标题)
-        self.toggle_btn = QPushButton(f"▶ {title}")
+        layout.setContentsMargins(0, 5, 0, 5)
+        layout.setSpacing(0)
+        
+        # 思考内容容器
+        content_frame = QFrame()
+        content_frame.setStyleSheet("""
+            QFrame {
+                background-color: transparent;
+                border: none;
+            }
+        """)
+        content_layout = QVBoxLayout(content_frame)
+        content_layout.setContentsMargins(10, 8, 10, 8)
+        
+        # 思考文本
+        self.text_label = QLabel(self.full_text if self.full_text == "正在思考中..." else "")
+        self.text_label.setWordWrap(True)
+        self.text_label.setFont(QFont("Consolas", 9, QFont.StyleItalic))
+        self.text_label.setStyleSheet("color: #6c757d; border: none;")
+        self.text_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
+        
+        content_layout.addWidget(self.text_label)
+        
+        # 折叠按钮
+        self.toggle_btn = QPushButton("收起思考过程 ▲")
         self.toggle_btn.setFlat(True)
         self.toggle_btn.setCursor(Qt.PointingHandCursor)
         self.toggle_btn.setStyleSheet("""
             QPushButton {
                 text-align: left;
-                color: #666;
-                font-size: 11px;
+                color: #adb5bd;
+                font-size: 10px;
                 border: none;
-                padding: 4px;
-                background-color: #f9f9f9;
-                border-radius: 4px;
+                padding-left: 10px;
             }
-            QPushButton:hover { background-color: #f0f0f0; color: #333; }
+            QPushButton:hover { color: #6c757d; }
         """)
-        self.toggle_btn.clicked.connect(self.toggle_details)
+        self.toggle_btn.clicked.connect(self.toggle_content)
+        self.toggle_btn.setVisible(False) # 初始隐藏，有真实内容时显示
+
+        self.content_frame = content_frame
         
-        # 详情区域
-        self.details_area = QLabel(details)
-        self.details_area.setWordWrap(True)
-        self.details_area.setFont(QFont("Consolas", 9))
-        self.details_area.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.details_area.setTextFormat(Qt.PlainText)
-        self.details_area.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
-        self.details_area.setStyleSheet("""
-            color: #444; 
-            padding: 10px; 
-            background-color: #f9f9f9;
-            border: 1px solid #e0e0e0;
-            border-radius: 4px;
-        """)
-        self.details_area.setVisible(False)
-        
+        layout.addWidget(content_frame)
         layout.addWidget(self.toggle_btn)
-        layout.addWidget(self.details_area)
+
+    def set_text(self, text):
+        """更新思考内容并开始打字"""
+        self.full_text = text
+        self.current_text = ""
+        self.text_label.setText("")
+        self.toggle_btn.setVisible(True)
+        self.start_typing()
+
+    def toggle_content(self):
+        visible = not self.content_frame.isVisible()
+        self.content_frame.setVisible(visible)
+        self.toggle_btn.setText("收起思考过程 ▲" if visible else "展开思考过程 ▼")
+
+    def start_typing(self):
+        self.typing_timer = QTimer(self)
+        self.typing_timer.timeout.connect(self.update_text)
+        self.typing_timer.start(20) # 思考打字速度稍快
+
+    def update_text(self):
+        if len(self.current_text) < len(self.full_text):
+            self.current_text += self.full_text[len(self.current_text)]
+            self.text_label.setText(self.current_text)
+            self.text_label.adjustSize()
+        else:
+            self.typing_timer.stop()
+
+
+# --- 步骤进度组件 (轮播+折叠) ---
+class StepProgressWidget(QWidget):
+    def __init__(self, steps, parent=None):
+        super().__init__(parent)
+        self.steps = steps  # List of dict: {'task': str, 'status': 'pending'}
+        self.current_step_index = 0
+        self.init_ui()
+
+    def init_ui(self):
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(0, 5, 0, 5)
+        self.main_layout.setSpacing(0)
+
+        # 1. 容器 Frame
+        self.container = QFrame()
+        self.container.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border: 1px solid #e9ecef;
+                border-radius: 6px;
+            }
+        """)
+        container_layout = QVBoxLayout(self.container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(0)
+
+        # 2. 头部：当前步骤轮播 (始终可见)
+        self.header_frame = QFrame()
+        self.header_frame.setStyleSheet("background-color: #e3f2fd; border-top-left-radius: 6px; border-top-right-radius: 6px;")
+        header_layout = QHBoxLayout(self.header_frame)
+        header_layout.setContentsMargins(10, 8, 10, 8)
+
+        self.status_icon = QLabel("⏳") 
+        self.status_text = QLabel("正在初始化任务...")
+        self.status_text.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
+        self.status_text.setStyleSheet("color: #0d47a1;")
+        
+        self.toggle_btn = QPushButton("展开详情 ▼")
+        self.toggle_btn.setFlat(True)
+        self.toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.toggle_btn.setStyleSheet("color: #666; font-size: 10px; text-align: right;")
+        self.toggle_btn.clicked.connect(self.toggle_details)
+
+        header_layout.addWidget(self.status_icon)
+        header_layout.addWidget(self.status_text, 1)
+        header_layout.addWidget(self.toggle_btn)
+
+        # 3. 详情列表 (默认隐藏)
+        self.details_frame = QFrame()
+        self.details_frame.setVisible(False)
+        self.details_layout = QVBoxLayout(self.details_frame)
+        self.details_layout.setContentsMargins(10, 5, 10, 10)
+        self.details_layout.setSpacing(5)
+
+        # 初始化步骤列表项
+        self.step_labels = []
+        for i, step in enumerate(self.steps):
+            lbl = QLabel(f"{i+1}. {step['task']}")
+            lbl.setFont(QFont("Microsoft YaHei", 9))
+            lbl.setStyleSheet("color: #adb5bd;") # 默认灰色
+            lbl.setWordWrap(True)
+            self.details_layout.addWidget(lbl)
+            self.step_labels.append(lbl)
+
+        container_layout.addWidget(self.header_frame)
+        container_layout.addWidget(self.details_frame)
+        
+        self.main_layout.addWidget(self.container)
 
     def toggle_details(self):
-        visible = not self.details_area.isVisible()
-        self.details_area.setVisible(visible)
-        current_text = self.toggle_btn.text()
-        arrow = "▼" if visible else "▶"
-        title_part = current_text[2:] if len(current_text) > 2 else current_text
-        self.toggle_btn.setText(f"{arrow} {title_part}")
+        visible = not self.details_frame.isVisible()
+        self.details_frame.setVisible(visible)
+        self.toggle_btn.setText("收起详情 ▲" if visible else "展开详情 ▼")
+
+    def update_step_status(self, index, status, result_text=None):
+        """
+        status: 'running', 'success', 'fail'
+        """
+        if index < 0 or index >= len(self.steps):
+            return
+        
+        self.current_step_index = index
+        task_name = self.steps[index]['task']
+        total_steps = len(self.steps)
+        completed_steps = sum(1 for step in self.steps[:index] if True) # 简单计算，实际上应该根据状态
+        if status == 'success':
+            completed_steps += 1
+        
+        # 更新头部轮播
+        if status == 'running':
+            self.status_icon.setText("🔄")
+            self.status_text.setText(f"共{total_steps}个执行流程，{index}/{total_steps}已完成，步骤{index+1}正在执行中")
+            self.step_labels[index].setStyleSheet("color: #007bff; font-weight: bold;")
+            self.step_labels[index].setText(f"➤ {index+1}. {task_name} (执行中...)")
+        elif status == 'success':
+            self.status_icon.setText("✅")
+            self.status_text.setText(f"共{total_steps}个执行流程，{index+1}/{total_steps}已完成，步骤{index+1}执行成功")
+            self.step_labels[index].setStyleSheet("color: #28a745;")
+            self.step_labels[index].setText(f"✔ {index+1}. {task_name}")
+        elif status == 'fail':
+            self.status_icon.setText("❌")
+            self.status_text.setText(f"共{total_steps}个执行流程，{index}/{total_steps}已完成，步骤{index+1}执行失败")
+            self.step_labels[index].setStyleSheet("color: #dc3545;")
+            self.step_labels[index].setText(f"✘ {index+1}. {task_name} - {result_text}")
+
+
+# --- 错误展示组件 (嵌入式) ---
+class ErrorWidget(QWidget):
+    def __init__(self, error_report, parent=None):
+        super().__init__(parent)
+        self.init_ui(error_report)
+
+    def init_ui(self, report):
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(0, 5, 0, 5)
+        self.main_layout.setSpacing(0)
+
+        # 容器 Frame
+        self.container = QFrame()
+        self.container.setStyleSheet("""
+            QFrame {
+                background-color: #fff5f5;
+                border: 1px solid #ffc9c9;
+                border-radius: 6px;
+            }
+        """)
+        container_layout = QVBoxLayout(self.container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(0)
+
+        # 头部：错误警示 (始终可见)
+        self.header_frame = QFrame()
+        self.header_frame.setStyleSheet("""
+            background-color: #ffe3e3; 
+            border-top-left-radius: 6px; 
+            border-top-right-radius: 6px;
+            border-bottom: 1px solid #ffc9c9;
+        """)
+        header_layout = QHBoxLayout(self.header_frame)
+        header_layout.setContentsMargins(10, 8, 10, 8)
+
+        self.status_icon = QLabel("⚠️") 
+        self.status_icon.setFont(QFont("Segoe UI Emoji", 12))
+        self.status_text = QLabel("任务执行遇到错误")
+        self.status_text.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
+        self.status_text.setStyleSheet("color: #c92a2a;")
+        
+        header_layout.addWidget(self.status_icon)
+        header_layout.addWidget(self.status_text, 1)
+
+        # 详情区域
+        self.details_frame = QFrame()
+        self.details_layout = QVBoxLayout(self.details_frame)
+        self.details_layout.setContentsMargins(10, 10, 10, 10)
+        
+        self.report_label = QLabel(report)
+        self.report_label.setWordWrap(True)
+        self.report_label.setFont(QFont("Microsoft YaHei", 9))
+        self.report_label.setStyleSheet("color: #862e9c;") # 深紫色或深红色文字
+        self.report_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        
+        self.details_layout.addWidget(self.report_label)
+
+        container_layout.addWidget(self.header_frame)
+        container_layout.addWidget(self.details_frame)
+        
+        self.main_layout.addWidget(self.container)
 
 
 # ---创建智能体工作小组处理工作线程---
@@ -221,17 +415,19 @@ class AgentsWorkgroupThread(QThread):
         负责在后台运行的 LangGraph 工作小组逻辑
     """
     # 消息信号: (text, sender, msg_type)
-    # sender: "user", "ai"
-    # msg_type: "text" (普通), "step" (中间步骤), "success" (成功), "error" (错误)
     message_signal = pyqtSignal(str, str, str)
     
-    error_signal = pyqtSignal(str)  # 严重错误信号
-    remove_thinking_signal = pyqtSignal()  # 移除思考气泡信号
-    create_msg_bar_signal = pyqtSignal(str)  # 创建消息栏信号
-    refresh_map_canvas_signal = pyqtSignal()  # 刷新地图画布信号
+    # 新增信号
+    thought_signal = pyqtSignal(str) # 思考内容
+    init_steps_signal = pyqtSignal(list) # 初始化步骤列表
+    update_step_signal = pyqtSignal(int, str, str) # 更新步骤状态 (index, status, result)
+    final_response_signal = pyqtSignal(str) # 最终自然语言回复
+    error_report_signal = pyqtSignal(str) # 错误报告弹窗
+    
+    remove_thinking_signal = pyqtSignal()
+    create_msg_bar_signal = pyqtSignal(str)
+    refresh_map_canvas_signal = pyqtSignal()
 
-    # 专门用于请求主线程执行项目操作的信号
-    # 参数: (source_type, query_params)
     execute_project_signal = pyqtSignal(str, dict)
     # 用于传递布局任务列表的信号
     layout_task_signal = pyqtSignal(list)
@@ -245,6 +441,7 @@ class AgentsWorkgroupThread(QThread):
         # 用于接收主线程执行结果的变量
         self.project_op_result = None
         self._is_stopped = False
+        self.execution_log = [] # 记录执行日志用于总结
 
     def stop(self):
         """停止线程任务"""
@@ -255,7 +452,6 @@ class AgentsWorkgroupThread(QThread):
     def execute_project_op(self, source_type, query_params):
         """执行项目操作（需在主线程运行）"""
         if self._is_stopped: return "任务已停止"
-        
         self.project_op_result = None
         self.execute_project_signal.emit(source_type, query_params)
         
@@ -263,7 +459,6 @@ class AgentsWorkgroupThread(QThread):
         while self.project_op_result is None:
             if self._is_stopped: return "任务已停止"
             self.msleep(50)
-            
         return self.project_op_result
 
     def execute_layout_op(self, tasks):
@@ -272,7 +467,6 @@ class AgentsWorkgroupThread(QThread):
         
         # 发送布局任务信号
         self.layout_task_signal.emit(tasks)
-        
         return "布局任务已发送至主线程执行。"
         
     def refresh_layers(self):
@@ -283,6 +477,33 @@ class AgentsWorkgroupThread(QThread):
         # 获取最新图层（注意：QgsProject 实例在多线程访问可能不安全，但读取通常还好）
         self.layers = list(QgsProject.instance().mapLayers().values())
         return self.layers
+
+    def generate_final_summary(self, thought):
+        """生成最终自然语言总结"""
+        log_str = "\n".join(self.execution_log)
+        prompt = FINAL_SUMMARY_PROMPT.format(
+            user_request=self.user_text,
+            thought=thought,
+            execution_log=log_str
+        )
+        try:
+            summary = call_qwen_with_prompt(prompt)
+            return summary
+        except Exception:
+            return "任务已完成。"
+
+    def generate_error_report(self, current_step, error_msg):
+        """生成错误报告"""
+        prompt = ERROR_REPORT_PROMPT.format(
+            user_request=self.user_text,
+            current_step=current_step,
+            error_msg=error_msg
+        )
+        try:
+            report = call_qwen_with_prompt(prompt)
+            return report
+        except Exception:
+            return f"执行出错：{error_msg}"
 
     # 运行智能体工作小组
     def run(self):
@@ -300,77 +521,92 @@ class AgentsWorkgroupThread(QThread):
             "execution_result": None,
             "error": "",
             "is_gis_task": True,
+            "thought": "",
             "executor": self
         }
+
+        current_thought = ""
+        task_plan = []
 
         try:
             # 使用 stream 模式运行
             for event in app.stream(inputs):
                 if self._is_stopped:
                     self.message_signal.emit("用户已手动停止流程。", "ai", "text")
-                    self.remove_thinking_signal.emit()
                     return
 
-                # event 是一个字典，key 是节点名，value 是该节点输出的状态更新
                 for node_name, state_update in event.items():
-                    if self._is_stopped:
-                        self.message_signal.emit("用户已手动停止流程。", "ai", "text")
-                        self.remove_thinking_signal.emit()
-                        return
-                        
-                    # 检查是否有错误
+                    if self._is_stopped: return
+                    
+                    # 错误处理
                     if "error" in state_update and state_update["error"]:
-                        self.error_signal.emit(state_update["error"])
-                        return # 终止
+                        err_msg = state_update["error"]
+                        current_step_info = f"步骤 {state_update.get('current_step', 0)+1}"
+                        report = self.generate_error_report(current_step_info, err_msg)
+                        self.error_report_signal.emit(report)
+                        return 
 
                     # 处理 TaskPlanner 输出
                     if node_name == "task_planner":
-                        self.remove_thinking_signal.emit()
+                        # 无论是否是GIS任务，如果有思考内容，先发送思考
+                        current_thought = state_update.get("thought", "")
+                        if current_thought:
+                             self.thought_signal.emit(current_thought)
+
                         if not state_update.get("is_gis_task", True):
+                            # 非GIS任务，直接走普通对话
                             ai_response = chat_with_openai(self.user_text)
-                            if "聊天接口报错:" in ai_response:
-                                self.error_signal.emit(ai_response)
-                            else:
-                                self.message_signal.emit(ai_response, "ai", "text")
-                            return # 结束
+                            self.final_response_signal.emit(ai_response)
+                            return 
 
+                        # 发送计划步骤
                         task_plan = state_update.get("task_plan", [])
+                        self.init_steps_signal.emit(task_plan)
                         
-                        # 显示计划
-                        self.message_signal.emit(f"Planner Output:\n{json.dumps(task_plan, indent=2, ensure_ascii=False)}", "ai", "step")
+                        # 记录日志
+                        self.execution_log.append(f"任务规划: {len(task_plan)} 个步骤")
 
-                    # 处理 TaskRouter 输出
+                    # 2. Router Node (任务开始)
                     elif node_name == "task_router":
-                        task = state_update.get("current_task")
                         step_idx = state_update.get("current_step", 0)
-                        # 显示正在执行
-                        self.message_signal.emit(f"正在执行第{step_idx+1}步：{task}", "ai", "text")
+                        task_desc = state_update.get("current_task", "")
+                        
+                        # 更新UI为"运行中"
+                        self.update_step_signal.emit(step_idx, "running", "")
+                        self.execution_log.append(f"步骤 {step_idx+1} 开始: {task_desc}")
 
-                    # 处理 AgentExecutor 输出
+                    # 3. Executor Node (任务完成)
                     elif node_name == "agent_executor":
                         result = state_update.get("execution_result", {})
+                        step_idx = state_update.get("current_step", 0) # 这里还是当前的step index
+                        
                         if result.get("is_process_complete"):
-                            tool_result = result.get("tool_result", "完成")
-                            self.message_signal.emit(f"步骤执行完成！\n详情: {tool_result}", "ai", "step")
+                            tool_res = result.get("tool_result", "完成")
+                            self.update_step_signal.emit(step_idx, "success", tool_res)
+                            self.execution_log.append(f"步骤 {step_idx+1} 成功: {tool_res}")
                             self.refresh_map_canvas_signal.emit()
                         else:
                             prob = result.get("possible_problem", "未知错误")
-                            self.message_signal.emit(f"步骤执行遇到问题: {prob}", "ai", "text")
-                            # 这里可以选择终止或继续，workflow_graph 默认会根据 conditional_edge 终止或抛错
+                            self.update_step_signal.emit(step_idx, "fail", prob)
+                            # 触发错误弹窗
+                            report = self.generate_error_report(f"第 {step_idx+1} 步", prob)
+                            self.error_report_signal.emit(report)
+                            return # 终止
                             
-            # 循环结束，检查最终状态
-            if not self._is_stopped:
-                self.message_signal.emit("任务流程结束。", "ai", "text")
+            # 流程正常结束
+            if not self._is_stopped and task_plan:
+                summary = self.generate_final_summary(current_thought)
+                self.final_response_signal.emit(summary)
 
         except Exception as e:
             if not self._is_stopped:
-                self.error_signal.emit(f"流程异常终止：{e}")
+                report = self.generate_error_report("系统内部错误", str(e))
+                self.error_report_signal.emit(report)
 
 
 class ChatBox(QObject):
     """
     逻辑控制器类
-    不再是 QWidget，而是管理从 .ui 文件加载的控件
     """
     
     def __init__(self, dock_widget):
@@ -382,12 +618,9 @@ class ChatBox(QObject):
         self.user_inputBox = dock_widget.user_inputBox
         self.send_button = dock_widget.send_button
         self.voice_btn = dock_widget.voice_btn
-        # 新增 stop_button 绑定
         self.stop_button = dock_widget.stop_button
         
-        # 获取 chat_container 布局 (在 .ui 中是 scrollAreaWidgetContents)
         self.chat_container = dock_widget.scrollAreaWidgetContents
-        # 获取或设置布局
         if self.chat_container.layout() is None:
             self.chat_layout = QVBoxLayout(self.chat_container)
             self.chat_layout.setAlignment(Qt.AlignTop)
@@ -397,147 +630,129 @@ class ChatBox(QObject):
             self.chat_layout = self.chat_container.layout()
             self.chat_layout.setAlignment(Qt.AlignTop)
 
-        # 初始化状态
-        self.ai_thinking_bubble = None
         self.agents_workgroup = None
-
-        # 连接信号槽
-        self.setup_connections()
+        self.current_step_widget = None # 当前的步骤组件引用
+        self.current_thinking_bubble = None # 当前的思考组件引用
         
-        # 初始化音频管理器
-        self.init_audio()
+        self.setup_connections()
 
     def setup_connections(self):
-        # 监控输入框高度变化 (模拟 auto-height)
-        self.user_inputBox.textChanged.connect(self.adjust_input_height)
-        
-        # 监控 Enter 键发送
-        # QTextEdit 没有 returnPressed 信号，需要事件过滤器
-        self.user_inputBox.installEventFilter(self)
-        
+        """绑定信号与槽"""
         # 发送按钮
         self.send_button.clicked.connect(self.send_message)
-        
         # 停止按钮
         self.stop_button.clicked.connect(self.stop_process)
+        # 语音按钮
+        # self.voice_btn.clicked.connect(self.start_voice_input) 
 
-    def init_audio(self):
-        # 初始化音频管理器
-        self.audio_manager = AudioManager(api_key=API_KEY)
-        self.audio_manager.transcription_ready.connect(self.on_voice_text_received)
-        self.audio_manager.error_occurred.connect(self.on_voice_error)
-        self.audio_manager.recording_started.connect(self.on_recording_started)
-        self.audio_manager.recording_stopped.connect(self.on_recording_stopped)
-
-        # 创建热词管理器，并传入音频管理器
-        self.hotword_manager = QGISHotwordManager()
-        self.audio_manager.set_hotword_manager(self.hotword_manager)
-
-        # 绑定按住/松开事件
-        self.voice_btn.pressed.connect(self.audio_manager.start_recording)
-        self.voice_btn.released.connect(self.audio_manager.stop_recording)
+        # 安装事件过滤器以处理 Enter/Shift+Enter
+        self.user_inputBox.installEventFilter(self)
 
     def eventFilter(self, obj, event):
+        """事件过滤器：处理键盘事件"""
         if obj == self.user_inputBox and event.type() == event.KeyPress:
-            if event.key() == Qt.Key_Return:
+            if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
                 if event.modifiers() & Qt.ShiftModifier:
-                    # Shift+Enter: 换行，不做处理，默认行为
+                    # Shift + Enter: 正常换行
                     return False
                 else:
-                    # Enter: 发送
+                    # 仅 Enter: 发送消息
                     self.send_message()
-                    return True  # 拦截事件
+                    return True
         return super().eventFilter(obj, event)
 
-    def adjust_input_height(self):
-        doc_height = self.user_inputBox.document().size().height()
-        new_height = min(max(40, doc_height + 10), 100)
-        self.user_inputBox.setFixedHeight(int(new_height))
-
-    # --- 生成对话气泡 ---
-    def add_message(self, text, sender="user", msg_type="text", typing_effect=False):
-        """
-        添加消息到聊天窗口
-        :param text: 消息内容
-        :param sender: 发送者 ("user" 或 "ai")
-        :param msg_type: 消息类型 ("text", "step", "error" 等)
-        :param typing_effect: 是否启用打字机效果
-        """
-        # 确定头像路径
-        avatar_path = None
+    # --- UI 添加方法 ---
+    def add_message(self, text, sender, msg_type="text", typing_effect=False):
+        """添加一条消息气泡"""
+        avatar = None
+        # 如果是AI，这里可以指定头像路径
         if sender == "ai":
-            avatar_path = os.path.join(os.path.dirname(__file__), "icon.png")
-        
-        if msg_type == "step":
-            lines = text.split('\n', 1)
-            title = lines[0]
-            details = lines[1] if len(lines) > 1 else text
-            bubble = ProcessBubble(title, details)
-        else:
-            bubble = ChatBubble(text, sender, avatar_path, typing_effect=typing_effect)
-
+             avatar = os.path.join(os.path.dirname(__file__), 'icon.png')
+            
+        bubble = ChatBubble(text, sender, avatar_path=avatar, typing_effect=typing_effect)
         self.chat_layout.addWidget(bubble)
-
-        # 自动滚动到底部
-        QTimer.singleShot(10, lambda: self.scrollArea.verticalScrollBar().setValue(
-            self.scrollArea.verticalScrollBar().maximum()
-        ))
+        self.scroll_to_bottom()
         return bubble
 
-    # --- 发送消息事件 ---
+    def scroll_to_bottom(self):
+        """滚动到底部"""
+        # 使用 QTimer 确保在 UI 刷新后执行滚动
+        QTimer.singleShot(100, lambda: self.scrollArea.verticalScrollBar().setValue(
+            self.scrollArea.verticalScrollBar().maximum()
+        ))
+
+    def add_step_widget(self, steps):
+        """添加步骤进度组件"""
+        if not steps:
+            return
+            
+        # 思考气泡保留，不隐藏也不移除
+        
+        self.current_step_widget = StepProgressWidget(steps)
+        self.chat_layout.addWidget(self.current_step_widget)
+        self.scroll_to_bottom()
+
+    def add_thinking_bubble(self, text):
+        if self.current_thinking_bubble:
+            # 如果已经有思考气泡，更新它
+            self.current_thinking_bubble.set_text(text)
+        else:
+            # 否则创建新的
+            self.current_thinking_bubble = ThinkingBubble(text)
+            self.chat_layout.addWidget(self.current_thinking_bubble)
+            self.scroll_to_bottom()
+        return self.current_thinking_bubble
+
     def send_message(self):
         user_text = self.user_inputBox.toPlainText().strip()
         if not user_text:
             return
 
-        # 1. 显示用户输入
         self.add_message(user_text, "user")
         self.user_inputBox.clear()
-
-        # 2. 获取当前QGIS项目中的图层
+        
         layers = list(QgsProject.instance().mapLayers().values())
 
-        # 3. 显示思考状态 (不使用打字机效果)
-        self.ai_thinking_bubble = self.add_message("正在思考中...", "ai", typing_effect=False)
-
-        # 4. 更新UI状态：隐藏发送按钮，显示停止按钮
+        # 准备 UI
         self.send_button.setVisible(False)
         self.stop_button.setVisible(True)
 
-        # 5. 实例化并启动工作小组工作线程
-        self.agents_workgroup = AgentsWorkgroupThread(user_text, layers)
+        # 立即显示“正在思考中...”
+        self.current_thinking_bubble = ThinkingBubble("正在思考中...")
+        self.chat_layout.addWidget(self.current_thinking_bubble)
+        self.scroll_to_bottom()
 
-        # 6. 连接信号到槽函数
-        self.agents_workgroup.message_signal.connect(self.receive_ai_message)  # 处理消息
-        self.agents_workgroup.error_signal.connect(self.process_error)  # 处理错误
-        self.agents_workgroup.remove_thinking_signal.connect(self.remove_thinking_bubble)  # 移除气泡
-        self.agents_workgroup.create_msg_bar_signal.connect(create_msg_bar)  # 创建消息栏
-        self.agents_workgroup.finished.connect(self.agents_workgroup.deleteLater)
-        self.agents_workgroup.finished.connect(self.on_thread_finished) # 线程结束恢复UI
-        self.agents_workgroup.refresh_map_canvas_signal.connect(self.refresh_map_canvas)  # 刷新地图画布
+        # 启动线程
+        self.agents_workgroup = AgentsWorkgroupThread(user_text, layers)
+        
+        # 绑定新信号
+        self.agents_workgroup.thought_signal.connect(self.add_thinking_bubble)
+        self.agents_workgroup.init_steps_signal.connect(self.add_step_widget)
+        self.agents_workgroup.update_step_signal.connect(self.update_step_status)
+        self.agents_workgroup.final_response_signal.connect(self.show_final_response)
+        self.agents_workgroup.error_report_signal.connect(self.show_error_popup)
+        
+        self.agents_workgroup.message_signal.connect(self.receive_ai_message) # 兼容旧信号
+        
+        self.agents_workgroup.finished.connect(self.on_thread_finished)
+        self.agents_workgroup.refresh_map_canvas_signal.connect(self.refresh_map_canvas)
         self.agents_workgroup.execute_project_signal.connect(self.handle_project_execution)
         self.agents_workgroup.layout_task_signal.connect(self.handle_layout_tasks)
 
-        # 7. 启动线程
         self.agents_workgroup.start()
 
     def stop_process(self):
-        """用户点击停止按钮"""
         if self.agents_workgroup and self.agents_workgroup.isRunning():
             self.agents_workgroup.stop()
-            # UI 更新将在 thread finished 信号中处理
-            # 但为了即时反馈，禁用按钮
             self.stop_button.setEnabled(False)
 
     def on_thread_finished(self):
-        """线程结束时的清理工作"""
         self.stop_button.setVisible(False)
         self.stop_button.setEnabled(True)
         self.send_button.setVisible(True)
-        self.remove_thinking_bubble()
         self.agents_workgroup = None
+        self.current_step_widget = None
 
-    # ---槽函数：在主线程执行项目操作---
     def handle_project_execution(self, source_type, params):
         try:
             result = execute_project_task(source_type, params)
@@ -546,47 +761,43 @@ class ChatBox(QObject):
         if self.agents_workgroup:
             self.agents_workgroup.project_op_result = result
 
-    # 槽函数：在主线程安全地操作 QGIS 界面 ---
     def handle_layout_tasks(self, tasks):
         results = []
         for req in tasks:
             res_msg = execute_layout_task(req)
             results.append(res_msg)
         final_msg = " | ".join(results)
-        self.add_message(f"布局操作执行结果：\n{final_msg}", "ai")
+        # 布局任务通常是最后一步，这里不直接发消息，让线程流程控制
         self.refresh_map_canvas()
 
-    # ---槽函数：接收线程结果---
     def receive_ai_message(self, text, sender, msg_type="text"):
-        # 确保 msg_type 有默认值，虽然信号通常会传所有参数
-        # 仅对 AI 的普通文本消息启用打字机效果
-        typing = (sender == "ai" and msg_type == "text")
-        self.add_message(text, sender, msg_type, typing_effect=typing)
+        # 仅处理普通文本，步骤信息已由专用组件处理
+        if msg_type == "text":
+            self.add_message(text, sender, msg_type)
 
-    # ---槽函数：接收线程错误信息---
-    def process_error(self, err_msg):
-        self.remove_thinking_bubble()
-        create_msg_bar(err_msg, Qgis.Info)
-        self.add_message(f"任务执行出错: {err_msg}", "ai")
+    def update_step_status(self, index, status, result):
+        if self.current_step_widget:
+            self.current_step_widget.update_step_status(index, status, result)
 
-    def remove_thinking_bubble(self):
-        if self.ai_thinking_bubble:
-            self.ai_thinking_bubble.deleteLater()
-            self.ai_thinking_bubble = None
+    def show_final_response(self, text):
+        self.add_message(text, "ai", typing_effect=True)
 
-    def show_initial_message(self):
-        self.add_message(INITIAL_MESSAGE, "ai")
-        # 强制更新布局
-        self.chat_container.update()
-        self.scrollArea.update()
-        QTimer.singleShot(50, lambda: self.scrollArea.verticalScrollBar().setValue(
-            self.scrollArea.verticalScrollBar().maximum()
-        ))
+    def add_error_widget(self, report):
+        """添加错误报告组件"""
+        error_widget = ErrorWidget(report)
+        self.chat_layout.addWidget(error_widget)
+        self.scroll_to_bottom()
 
-    # 槽函数：刷新地图画布
+    def show_error_popup(self, report):
+        # 兼容旧信号，改为直接添加 Widget
+        self.add_error_widget(report)
+
     def refresh_map_canvas(self):
         if iface and iface.mapCanvas():
             iface.mapCanvas().refresh()
+
+    def show_initial_message(self):
+        self.add_message(INITIAL_MESSAGE, "ai")
 
     def on_recording_started(self):
         self.voice_btn.setStyleSheet("background-color: #ffcccc; border-radius: 16px; border: 1px solid red;")
