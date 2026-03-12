@@ -6,35 +6,13 @@ from typing import List, Tuple, Dict, Any
 import requests
 from qgis.core import QgsMapLayer, QgsVectorLayer, QgsRasterLayer, Qgis, QgsMessageLog, QgsProject, QgsWkbTypes
 
-from camel.agents import ChatAgent
-from camel.messages import BaseMessage
-from camel.models import ModelFactory
-from camel.types import ModelPlatformType, ModelType
-from camel.configs import QwenConfig
-from camel.toolkits import FunctionTool
-
 from .fetch_data import execute_fetch_task, get_catalog_for_prompt
 from .spatial_process import execute_geoprocessing_task
 from .style_management import set_layer_style
 from .retrieve_style_config import retrieve_style_config
 from .prompts import agent_a_prompt, agent_b_prompt, agent_c_prompt, agent_d_prompt, agent_e_prompt
 from .project_management import execute_project_task
-
-# --- 配置 ---
-logging.getLogger('camel').setLevel(logging.CRITICAL)
-API_KEY = "sk-a2cddd46f8924031b2888c97c73c6e43"
-MODEL_TYPE = ModelType.QWEN_2_5_CODER_32B
-MODEL_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-
-# --- 模型初始化 ---
-model = ModelFactory.create(
-    model_platform=ModelPlatformType.QWEN,
-    model_type=MODEL_TYPE,
-    api_key=API_KEY,
-    url=MODEL_URL,
-    model_config_dict=QwenConfig(temperature=0.2).as_dict(),
-)
-
+from .chat_model import call_qwen_with_prompt
 
 # --- 辅助函数：图层名称与字段提取 (从 QgsMapLayer 对象列表提取名称和字段) ---
 def get_layer_name_and_fields(layers: List[QgsMapLayer]) -> Tuple[List[str], str]:
@@ -119,18 +97,22 @@ def run_agent_a(user_text: str) -> Dict[str, Any]:
 
     # 3. 调用 LLM
     try:
-        sys_msg = BaseMessage.make_assistant_message(role_name="数据获取智能体", content=final_prompt)
-        agent = ChatAgent(system_message=sys_msg, model=model)
-
-        user_msg = BaseMessage.make_user_message(role_name="User", content=user_text)
-        response = agent.step(user_msg)
-        json_content = response.msgs[0].content.strip()
+        # 构建完整 Prompt：System Prompt + User Input
+        full_prompt = f"{final_prompt}\n\n用户输入: {user_text}"
+        json_content = call_qwen_with_prompt(full_prompt)
+        json_content = json_content.strip()
 
     except Exception as e:
         return {"is_process_complete": False, "possible_problem": f"AI模型或通信错误: {str(e)}"}
 
     # 解析 JSON
     try:
+        # 简单清洗 markdown 标记
+        if "```json" in json_content:
+            json_content = json_content.split("```json")[1].split("```")[0].strip()
+        elif "```" in json_content:
+            json_content = json_content.split("```")[1].split("```")[0].strip()
+            
         fetch_request = json.loads(json_content)
     except json.JSONDecodeError:
         return {"is_process_complete": False,
@@ -182,16 +164,19 @@ def run_agent_b(user_text: str, layers: List[QgsMapLayer]) -> Dict[str, Any]:
 
     # 3. 调用 LLM
     try:
-        sys_msg = BaseMessage.make_assistant_message(role_name="数据处理智能体", content=dynamic_sys_prompt)
-        agent = ChatAgent(system_message=sys_msg, model=model)
-        user_msg = BaseMessage.make_user_message(role_name="User", content=user_text)
-        response = agent.step(user_msg)
-        json_content = response.msgs[0].content.strip()
+        full_prompt = f"{dynamic_sys_prompt}\n\n用户输入: {user_text}"
+        json_content = call_qwen_with_prompt(full_prompt)
+        json_content = json_content.strip()
     except Exception as e:
         return {"is_process_complete": False, "possible_problem": f"AI模型错误: {str(e)}"}
 
     # 4. 解析 JSON
     try:
+        if "```json" in json_content:
+            json_content = json_content.split("```json")[1].split("```")[0].strip()
+        elif "```" in json_content:
+            json_content = json_content.split("```")[1].split("```")[0].strip()
+            
         analysis_request = json.loads(json_content)
         QgsMessageLog.logMessage(f"agent_b任务:{analysis_request}", tag='AI_AGENT_DEBUG', level=Qgis.Info)
     except json.JSONDecodeError:
@@ -271,14 +256,13 @@ def run_agent_c(user_text: str, layers: List[QgsMapLayer]) -> dict:
             "请仅返回标准的 JSON 格式，不要包含 Markdown 标记或其他文本：\n"
             "{\"target_layer_name\": \"精确匹配的图层名称\", \"content_inference\": \"语义关键词\"}"
         )
-        extract_sys_msg = BaseMessage.make_assistant_message(role_name="ExtractAgent", content=extract_sys_prompt)
-        extract_agent = ChatAgent(system_message=extract_sys_msg, model=model)
-        
-        extract_input = f"用户输入: {user_text}\n可用图层列表: {available_names}"
-        extract_res = extract_agent.step(BaseMessage.make_user_message(role_name="User", content=extract_input)).msgs[0].content.strip()
+        extract_input = f"{extract_sys_prompt}\n\n用户输入: {user_text}\n可用图层列表: {available_names}"
+        extract_res = call_qwen_with_prompt(extract_input).strip()
         
         if "```json" in extract_res:
-            extract_res = extract_res.replace("```json", "").replace("```", "")
+            extract_res = extract_res.split("```json")[1].split("```")[0].strip()
+        elif "```" in extract_res:
+            extract_res = extract_res.split("```")[1].split("```")[0].strip()
         
         extract_json = json.loads(extract_res)
         target_layer_name = extract_json.get("target_layer_name")
@@ -334,13 +318,14 @@ def run_agent_c(user_text: str, layers: List[QgsMapLayer]) -> dict:
 
     # --- Step 4: 执行生成 (Generation) ---
     try:
-        sys_msg = BaseMessage.make_assistant_message(role_name="样式处理智能体", content=dynamic_agent_c_prompt)
-        agent = ChatAgent(system_message=sys_msg, model=model)
-        json_content = agent.step(user_text).msgs[0].content.strip()
+        full_prompt = f"{dynamic_agent_c_prompt}\n\n用户输入: {user_text}"
+        json_content = call_qwen_with_prompt(full_prompt).strip()
 
         # 简单清洗 markdown 标记
-        if json_content.startswith("```json"):
-            json_content = json_content.replace("```json", "").replace("```", "")
+        if "```json" in json_content:
+            json_content = json_content.split("```json")[1].split("```")[0].strip()
+        elif "```" in json_content:
+            json_content = json_content.split("```")[1].split("```")[0].strip()
 
     except Exception as e:
         return {"is_process_complete": False, "possible_problem": f"AI模型或通信错误: {str(e)}"}
@@ -421,11 +406,13 @@ def run_agent_d(user_text: str, execute: bool = True) -> Dict[str, Any]:
     """
     try:
         # 1. LLM 思考生成 JSON
-        sys_msg = BaseMessage.make_assistant_message(role_name="项目管理智能体", content=agent_d_prompt)
-        agent = ChatAgent(system_message=sys_msg, model=model)
-        user_msg = BaseMessage.make_user_message(role_name="User", content=user_text)
-        response = agent.step(user_msg)
-        json_content = response.msgs[0].content.strip()
+        full_prompt = f"{agent_d_prompt}\n\n用户输入: {user_text}"
+        json_content = call_qwen_with_prompt(full_prompt).strip()
+
+        if "```json" in json_content:
+            json_content = json_content.split("```json")[1].split("```")[0].strip()
+        elif "```" in json_content:
+            json_content = json_content.split("```")[1].split("```")[0].strip()
 
         project_request = json.loads(json_content)
 
@@ -468,13 +455,10 @@ def run_agent_e(user_text: str, layers: List[QgsMapLayer]) -> Dict[str, Any]:
     """
     try:
         # 1. 调用 LLM
-        sys_msg = BaseMessage.make_assistant_message(role_name="视图布局专家", content=agent_e_prompt)
-        agent = ChatAgent(system_message=sys_msg, model=model)
-
-        response = agent.step(BaseMessage.make_user_message(role_name="User", content=user_text))
+        full_prompt = f"{agent_e_prompt}\n\n用户输入: {user_text}"
+        json_content = call_qwen_with_prompt(full_prompt).strip()
 
         # 2. 解析 JSON
-        json_content = response.msgs[0].content.strip()
         if "```json" in json_content:
             import re
             match = re.search(r'\[.*\]', json_content, re.DOTALL)
@@ -483,6 +467,8 @@ def run_agent_e(user_text: str, layers: List[QgsMapLayer]) -> Dict[str, Any]:
             else:
                 match_obj = re.search(r'\{.*\}', json_content, re.DOTALL)
                 if match_obj: json_content = f"[{match_obj.group()}]"
+        elif "```" in json_content:
+            json_content = json_content.split("```")[1].split("```")[0].strip()
 
         try:
             requests = json.loads(json_content)
