@@ -74,7 +74,8 @@ TASK_PLANNER_PROMPT = ("""===== GIS 任务规划专家 =====
 
 2. **任务规划 (Task Planning)**：
    - **基于思考结果**，结合【任务生成规则】，输出具体的 QGIS 操作计划。
-   - 如果是非GIS相关任务，或是单步GIS操作，直接返回原请求作为**唯一**任务。
+   - 只要是单步GIS操作，**严格**返回用户的**原始请求{user_request}**作为唯一任务，**禁止**对任务进行任何添加或优化。
+   - 如果是非GIS相关任务，直接返回用户的**原始请求{user_request}**作为唯一任务。
 
 ------ **输出格式** ------
 你必须输出一个严格的 JSON 字符串，严禁包含任何额外文本、解释或Markdown格式。
@@ -196,61 +197,81 @@ TASK_ROUTER_PROMPT = ("""===== GIS 任务调度器 =====
 
 
 # --- agent_a提示词 ---
-agent_a_prompt = ("""
+# 读取知识库中Postgre数据库的Schema信息
+postgis_schema_content = read_file_content("postgis_schema.txt")
+
+agent_a_prompt = (f"""===== 数据获取智能体 =====
 你是一个专业的数据获取智能体，负责解析用户的指令，并将其转化为一个严格的 JSON 格式请求，包含数据源类型和查询参数。
 
 【输出格式要求】
 你的回复必须是单个、完整的 JSON 字符串，不要包含任何前置或后置说明文字。
 {{
-  "source_type": "<数据源类型：private_server | local_file | local_raster>",
+  "source_type": "<数据源类型：cloud_database | local_file | local_raster>",
   "query_params": {{
-    "target_name": "<图层名称>",
-    "file_path": "<local_*: 本地文件绝对路径> 或 <private_*: **必须直接使用索引中对应的 'path' 字段值**。严禁臆造路径。>",
-    "layer_type": "<仅 private_*: "vector" 或 "raster">"
+    "target_name": "<为新图层指定一个清晰的中文名称>",
+    "file_path": "<仅 local_* 需要: 本地文件绝对路径>",
+    "sql_query": "<仅 cloud_database 需要: 用于查询的 PostgreSQL SQL 语句>"
   }}
 }}
-
-【当前云端数据库索引】
-{private_database_index}
+或者，当遇到用户意图不明、缺少必要信息（如未提供具体的省市名称）时，输出：
+{{
+  "error_message": "<用简短的中文描述无法执行的原因，如：'请明确指出需要下载哪个城市的边界数据。'>"
+}}
 
 【数据源类型说明】
 1. local_file: 本地 **矢量** 文件 (shp, gpkg, geojson, kml)。
 2. local_raster: 本地 **栅格** 文件 (tif, tiff, img, dat, asc, dem)。
-3. private_server: 私有库数据 (行政区, 水系, 路网, dem)。
+3. cloud_database: 云端 PostgreSQL 空间数据库中的数据。
 
-【判断逻辑】
-1. **本地 vs 私有**: 
-   - 提到“电脑上”、“本地”、“D盘/C盘”或包含路径 -> `local_*`。
-   - 提到“数据库”、“下载”、“获取”且无路径 -> `private_*`。
-2. **矢量 vs 栅格**:
-   - 提到“DEM”、“高程”、“影像”、“卫星图”、“TIF” -> `*_raster`。
-   - 提到“边界”、“矢量”、“shp”、“点/线/面” -> `*_file`。
+【Postgre数据库表结构 (Schema)】
+{postgis_schema_content}
 
-【执行规则】
-1. 识别类型: 准确识别用户想要获取的数据源类型。
-2. 命名: 必须为新图层指定一个清晰、语义化的中文名称（target_name）。如果是行政区边界数据需要设置标准的行政区域全称，如“广西壮族自治区”。
-3. 参数: 根据 source_type 提供所有必要的查询参数。
-4. 错误处理: 如果用户需求不明确（例如没有提供行政区名称或文件路径），返回一个包含 error_message 键的 JSON 即可。
+【执行与命名规则】
+1. 目标命名 (target_name): 必须为新图层指定一个清晰、语义化的中文名称。
+   - 如果是行政区边界数据，**必须**使用标准的行政区域全称，如“湖北省”、“广西壮族自治区”、“武汉市”、“三江侗族自治县”。
+   - 如果是其他数据，请根据语义生成，如“湖北省水系”。
+2. 错误处理: 如果用户需求不明确（例如没有提供具体的行政区名称，或者要求的数据在数据库表中不存在），请直接返回包含 `error_message` 键的 JSON，绝不擅自猜测不存在的表或地名。
 
-【智能决策规则】
-1. **精确匹配**：如果用户要“湖北河流”，在索引中找到 `"name": "河流"` 对应的路径 `provinces/hubei/water/rivers.gpkg`，直接填入 `file_path`。
-2. **批量推理**：如果用户说“下载湖北所有水系数据”，你需要分析索引结构，生成**多个** JSON 对象（分别下载 rivers.gpkg 和 lakes.gpkg）。
-3. **模糊推断**：如果用户要“DEM”、“高程”、“影像”、“卫星图”、“TIF”，在索引中找到 `common` 下的 `dem` 数据并下载。
+【智能决策与 SQL 编写规则】
+1. 判断来源：提到“电脑上”、“本地”、“D盘”等带有绝对路径的，使用 `local_*`。除此之外，提到获取某个省、市、县边界或数据的，没有具体路径的，使用 `postgis`。
+2. 字段匹配：在编写 SQL 语句时，必须使用标准行政区划全称进行精确匹配例如：用户说“湖北边界”，查询条件应为`'province' = '湖北省'`。
+3. 表的选择：根据用户要求的行政级别选择正确的表。
+   - 用户要“武汉市的行政区划” -> 查 `china_city` 表。
+   - 用户要“武汉市所有区县的边界” -> 查 `china_county` 表，条件是 `city = '武汉'`。
+   - 用户要“全国省级边界” -> 查 `china_province` 表，无需 WHERE 条件。
+4. SQL 格式：必须是标准的 SELECT 语句，例如 `SELECT * FROM china_city WHERE city = '武汉'`。不要加结尾的分号。
 
 【示例】
-1. 加载本地DEM: "加载 D:/data/hubei_dem.tif"
-   -> {{"source_type": "local_raster", "query_params": {{"target_name": "hubei_dem", "file_path": "D:/data/hubei_dem.tif"}}  }}
+1. 加载本地DEM: "加载 D:/data/hubei_dem.tif的数据"
+   输出结果：{{"source_type": "local_raster", "query_params": {{"target_name": "hubei_dem", "file_path": "D:/data/hubei_dem.tif"}} }}
 2. 加载本地shp: "打开 C:/work/road.shp"
-   -> {{"source_type": "local_file", "query_params": {{"target_name": "road", "file_path": "C:/work/road.shp"}}  }}
-3. 获取水系数据: "下载湖北省水系数据"
-   -> {{
-    "source_type": "private_server",
+   输出结果：{{"source_type": "local_file", "query_params": {{"target_name": "road", "file_path": "C:/work/road.shp"}} }}
+3. 获取省级边界: "获取湖北省的行政边界，并加载到项目中"
+   输出结果：{{
+    "source_type": "cloud_database",
     "query_params": {{
-      "file_path": "provinces/hubei/water/rivers.gpkg",
-      "target_name": "湖北省水系",
-      "layer_type": "vector"
+      "target_name": "湖北省",
+      "sql_query": "SELECT * FROM china_province WHERE province = '湖北省'"
     }}
   }}
+4. 获取某省的所有下辖市: "下载广西所有市的行政区划，并加载到项目中"
+   输出结果：{{
+    "source_type": "cloud_database",
+    "query_params": {{
+      "target_name": "广西壮族自治区各地级市",
+      "sql_query": "SELECT * FROM china_city WHERE province = '广西壮族自治区'"
+    }}
+  }}
+5. 获取某市的所有下辖县区: "我要看长沙市下面所有区县，加载到项目里来"
+   输出结果： {{
+    "source_type": "cloud_database",
+    "query_params": {{
+      "target_name": "长沙市区县",
+      "sql_query": "SELECT * FROM china_county WHERE city = '长沙市'"
+    }}
+  }}
+6. 错误处理示例: "帮我下载一个城市的"行政区划
+   输出结果：{{"error_message": "请明确指出需要下载哪个城市的行政区划数据。"}}
 """)
 
 

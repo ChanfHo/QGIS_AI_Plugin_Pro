@@ -6,7 +6,7 @@ from typing import List, Tuple, Dict, Any
 import requests
 from qgis.core import QgsMapLayer, QgsVectorLayer, QgsRasterLayer, Qgis, QgsMessageLog, QgsProject, QgsWkbTypes
 
-from .fetch_data import execute_fetch_task, get_catalog_for_prompt
+from .fetch_data import execute_fetch_task
 from .spatial_process import execute_geoprocessing_task
 from .style_management import set_layer_style
 from .retrieve_style_config import retrieve_style_config
@@ -88,12 +88,8 @@ def run_agent_a(user_text: str) -> Dict[str, Any]:
     """
         Agent A 的核心逻辑：调用 LLM 解析数据获取任务，并执行数据获取。
     """
-    # 1. 动态获取最新的服务器目录索引
-    catalog_json = get_catalog_for_prompt()
-
-    # 2. 将索引注入到 Prompt 中
-    # 使用 .format() 填充占位符
-    final_prompt = agent_a_prompt.format(private_database_index=catalog_json)
+    # 1. 使用预定义的 Agent A 提示词（包含数据库结构）
+    final_prompt = agent_a_prompt
 
     # 3. 调用 LLM
     try:

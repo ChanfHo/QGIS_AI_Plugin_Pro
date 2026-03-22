@@ -1,0 +1,25 @@
+目前数据库(qgis_ai_plugin_db)中包含以下数据表。当用户请求获取云端/数据库中的空间数据时，请根据以下结构生成 SQL 查询。
+所有表的空间几何列均为 `geom`，主键均为 `gid`。
+
+1. 表名: `china_province` (省级行政区划边界)
+   - `gid` (serial): 主键
+   - `province` (text): 省份名称 (如 '湖北省', '北京市')
+   - `code` (text): 行政代码
+   - `geom` (geometry): 空间几何数据
+
+2. 表名: `china_city` (市级行政区划边界)
+   - `gid` (serial): 主键
+   - `province` (text): 省份名称
+   - `city` (text): 城市名称 (如 '武汉市', '深圳市')
+   - `code` (text): 行政代码
+   - `geom` (geometry): 空间几何数据
+
+3. 表名: `china_county` (县区级行政区划边界)
+   - `gid` (serial): 主键
+   - `province` (text): 省份名称
+   - `city` (text): 城市名称
+   - `county` (text): 县区名称 (如 '武昌区', '南山区')
+   - `code` (text): 行政代码
+   - `geom` (geometry): 空间几何数据
+
+(注：未来如有新表添加，其结构将在此处继续列出。请严格只查询上述已知的表。)

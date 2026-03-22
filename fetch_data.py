@@ -6,35 +6,9 @@ import requests
 from typing import Dict, Any
 
 from qgis._core import QgsRasterLayer
-from qgis.core import (QgsVectorLayer, QgsProject, QgsMapLayer)
+from qgis.core import (QgsVectorLayer, QgsProject, QgsMapLayer, QgsDataSourceUri)
 
 LOG_TAG = 'AI_AGENT_DEBUG'
-
-_CACHED_CATALOG = None
-SERVER_IP = "47.100.209.65"
-BASE_URL = f"http://{SERVER_IP}:8000"
-
-def get_catalog_for_prompt() -> str:
-    """
-    内部辅助函数：获取服务器目录，并压缩成字符串，准备喂给 AI Prompt。
-    """
-    global _CACHED_CATALOG
-    if _CACHED_CATALOG:
-        return _CACHED_CATALOG
-
-    try:
-        url = f"{BASE_URL}/catalog"
-        # 设置短超时，避免阻塞
-        r = requests.get(url, timeout=3)
-        if r.status_code == 200:
-            data = r.json()
-            # 转换为紧凑的 JSON 字符串 (去空格) 以节省 Token
-            json_str = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
-            _CACHED_CATALOG = json_str
-            return json_str
-        return "无法连接服务器获取目录。"
-    except Exception:
-        return "服务器离线或网络错误。"
 
 def add_layer_to_project(layer: QgsMapLayer, target_name: str) -> str:
     """内部辅助函数：将图层添加到 QGIS 项目并设置名称。"""
@@ -80,38 +54,34 @@ def fetch_local_raster(file_path: str, target_name: str) -> str:
     return "Error: 文件存在但无法识别为栅格数据。"
 
 
-def fetch_file_by_path(file_path: str, target_name: str, layer_type: str = "vector") -> str:
+def fetch_postgis_layer(sql_query: str, target_name: str) -> str:
     """
-    【AI 工具】根据精准路径下载文件。
-    AI 从 Prompt 里看到路径后，直接传给这里。
+    【AI 工具】根据 SQL 语句从 PostGIS 数据库直接加载图层。
     """
-    download_url = f"{BASE_URL}/download/{file_path}"
-    filename = os.path.basename(file_path)
-    save_path = os.path.join(tempfile.gettempdir(), filename)
+    from qgis.core import QgsMessageLog, Qgis
+    
+    QgsMessageLog.logMessage(f"准备连接数据库, 生成的SQL: {sql_query}", tag=LOG_TAG, level=Qgis.Info)
 
-    try:
-        headers = {"User-Agent": "QGIS-Direct-Agent"}
-        r = requests.get(download_url, headers=headers, stream=True, timeout=60)
-
-        if r.status_code == 404:
-            return f"Error: 路径错误，服务器未找到文件: {file_path}"
-
-        r.raise_for_status()
-
-        with open(save_path, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
-
-        # 加载逻辑
-        if layer_type == "raster":
-            layer = QgsRasterLayer(save_path, target_name)
-        else:
-            layer = QgsVectorLayer(save_path, target_name, "ogr")
-
-        return add_layer_to_project(layer, target_name)
-
-    except Exception as e:
-        return f"Error: 下载失败: {str(e)}"
+    uri = QgsDataSourceUri()
+    uri.setConnection("39.102.119.130", "5432", "qgis_ai_plugin_db", "postgres", "iamchanfho")
+    
+    # 将 SQL 作为子查询作为数据源，必须指定几何列 'geom' 和主键 'gid'
+    uri.setDataSource("", f"({sql_query})", "geom", "", "gid")
+    
+    uri_string = uri.uri()
+    QgsMessageLog.logMessage(f"构造的图层 URI: {uri_string}", tag=LOG_TAG, level=Qgis.Info)
+    
+    layer = QgsVectorLayer(uri_string, target_name, "postgres")
+    
+    if layer.isValid():
+        QgsMessageLog.logMessage(f"图层验证成功! 坐标系: {layer.crs().authid()}, 要素数量: {layer.featureCount()}", tag=LOG_TAG, level=Qgis.Success)
+        if layer.featureCount() == 0:
+            QgsMessageLog.logMessage("警告：图层要素数量为 0，这可能是由于 SQL 查询条件未匹配到任何数据，或者是 QGIS 解析子查询时出错。", tag=LOG_TAG, level=Qgis.Warning)
+    else:
+        error_msg = layer.dataProvider().error().message() if layer.dataProvider() else "未知错误"
+        QgsMessageLog.logMessage(f"图层验证失败! 错误信息: {error_msg}", tag=LOG_TAG, level=Qgis.Critical)
+    
+    return add_layer_to_project(layer, target_name)
 
 
 def execute_fetch_task(source_type: str, query_params: Dict[str, Any]) -> str:
@@ -129,14 +99,11 @@ def execute_fetch_task(source_type: str, query_params: Dict[str, Any]) -> str:
     elif source_type == 'local_raster':
         return fetch_local_raster(query_params.get('file_path'), target_name)
 
-    elif source_type == 'private_server':
-        file_path = query_params.get('file_path')
-        target_name = query_params.get('target_name')
-        layer_type = query_params.get('layer_type', 'vector')
-        if not file_path:
-            return "Error: 缺少 file_path 参数"
-
-        return fetch_file_by_path(file_path, target_name, layer_type)
+    elif source_type == 'cloud_database':
+        sql_query = query_params.get('sql_query')
+        if not sql_query:
+            return "Error: 缺少 sql_query 参数"
+        return fetch_postgis_layer(sql_query, target_name)
 
     else:
         return f"Error: 不支持或未知的 source_type '{source_type}'。"
