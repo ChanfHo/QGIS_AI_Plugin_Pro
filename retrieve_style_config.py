@@ -39,11 +39,9 @@ def retrieve_style_config(query: str, geometry_type: str = None, inferred_keywor
         return None
 
     # 2. 构造查询文本 (Query Construction)
-    # 策略: 用户Query + LLM推断的关键词 (语义转译)
-    # 例如: "给 Wuhan_River 设置样式" + "河流 水系" -> "Wuhan_River 河流 水系"
-    search_text = query
-    if inferred_keyword:
-        search_text += f" {inferred_keyword}"
+    # 策略: 优先使用 LLM 提取的泛化地理语义进行向量检索，去除具体地名带来的噪音
+    # 例如: "湖北省省界" 推断出 "省级行政区界线" -> 使用 "省级行政区界线" 向量化
+    search_text = inferred_keyword if inferred_keyword else query
 
     # 3. 获取 Query 向量
     query_vector = None
@@ -77,14 +75,7 @@ def retrieve_style_config(query: str, geometry_type: str = None, inferred_keywor
         q_norm = np.linalg.norm(q_vec)
 
     for item in library:
-        # (1) 几何类型硬过滤
-        item_geo = item.get("geometry_type")
-        if geometry_type and item_geo and item_geo != "unknown":
-            # 兼容处理: 库中可能是 'line'，查询可能是 'LineString'
-            if geometry_type.lower() not in item_geo.lower() and item_geo.lower() not in geometry_type.lower():
-                continue
-
-        # (2) 计算匹配分数
+        # (1) 计算匹配分数
         score = 0.0
 
         # A. 向量相似度 (主要权重)
@@ -105,7 +96,7 @@ def retrieve_style_config(query: str, geometry_type: str = None, inferred_keywor
             for kw in keywords:
                 if kw.lower() in query_lower:
                     score = max(score, 0.9)  # 关键词全匹配给高分
-                elif inferred_keyword and inferred_keyword in kw:
+                elif inferred_keyword and (inferred_keyword.lower() in kw.lower() or kw.lower() in inferred_keyword.lower()):
                     score = max(score, 0.85)
 
         if score > best_score:
