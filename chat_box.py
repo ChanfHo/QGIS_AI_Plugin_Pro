@@ -296,13 +296,63 @@ class StepProgressWidget(QWidget):
 
         # 初始化步骤列表项
         self.step_labels = []
+        self.step_progress_bars = [] # 存储每个步骤对应的进度条组件(包含标签和进度条)
+        
         for i, step in enumerate(self.steps):
+            # 步骤容器
+            step_container = QWidget()
+            step_layout = QVBoxLayout(step_container)
+            step_layout.setContentsMargins(0, 0, 0, 0)
+            step_layout.setSpacing(2)
+            
+            # 步骤文本标签
             lbl = QLabel(f"{i+1}. {step['task']}")
             lbl.setFont(QFont("Microsoft YaHei", 9))
             lbl.setStyleSheet("color: #adb5bd;") # 默认灰色
             lbl.setWordWrap(True)
-            self.details_layout.addWidget(lbl)
+            
+            # 进度条容器 (默认隐藏)
+            progress_widget = QWidget()
+            progress_layout = QVBoxLayout(progress_widget)
+            progress_layout.setContentsMargins(15, 0, 0, 0) # 稍微缩进
+            progress_layout.setSpacing(2)
+            
+            target_lbl = QLabel("")
+            target_lbl.setFont(QFont("Microsoft YaHei", 8))
+            target_lbl.setStyleSheet("color: #6c757d;")
+            
+            p_bar = QProgressBar()
+            p_bar.setRange(0, 100)
+            p_bar.setValue(0)
+            p_bar.setFixedHeight(10)
+            p_bar.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #e9ecef;
+                    border-radius: 4px;
+                    text-align: center;
+                    background-color: #f8f9fa;
+                }
+                QProgressBar::chunk {
+                    background-color: #007bff;
+                    border-radius: 3px;
+                }
+            """)
+            p_bar.setTextVisible(False) # 隐藏自带文本，因为太窄了
+            
+            progress_layout.addWidget(target_lbl)
+            progress_layout.addWidget(p_bar)
+            progress_widget.setVisible(False)
+            
+            step_layout.addWidget(lbl)
+            step_layout.addWidget(progress_widget)
+            
+            self.details_layout.addWidget(step_container)
             self.step_labels.append(lbl)
+            self.step_progress_bars.append({
+                "widget": progress_widget,
+                "label": target_lbl,
+                "bar": p_bar
+            })
 
         container_layout.addWidget(self.header_frame)
         container_layout.addWidget(self.details_frame)
@@ -339,11 +389,38 @@ class StepProgressWidget(QWidget):
             self.status_text.setText(f"共{total_steps}个执行流程，{index+1}/{total_steps}已完成，步骤{index+1}执行成功")
             self.step_labels[index].setStyleSheet("color: #28a745;")
             self.step_labels[index].setText(f"✔ {index+1}. {task_name}")
+            # 成功后隐藏进度条
+            if index < len(self.step_progress_bars):
+                self.step_progress_bars[index]["widget"].setVisible(False)
         elif status == 'fail':
             self.status_icon.setText("❌")
             self.status_text.setText(f"共{total_steps}个执行流程，{index}/{total_steps}已完成，步骤{index+1}执行失败")
             self.step_labels[index].setStyleSheet("color: #dc3545;")
             self.step_labels[index].setText(f"✘ {index+1}. {task_name} - {result_text}")
+            # 失败后隐藏进度条
+            if index < len(self.step_progress_bars):
+                self.step_progress_bars[index]["widget"].setVisible(False)
+
+    def update_download_progress(self, target_name: str, percent: int):
+        """更新当前执行步骤的下载进度"""
+        idx = self.current_step_index
+        if idx >= 0 and idx < len(self.step_progress_bars):
+            p_data = self.step_progress_bars[idx]
+            
+            # 如果是新的下载任务或首次显示，强制显示详情并展开进度条
+            if not p_data["widget"].isVisible():
+                p_data["widget"].setVisible(True)
+                # 自动展开详情面板以便用户看到进度条
+                if not self.details_frame.isVisible():
+                    self.toggle_details()
+                    
+            p_data["label"].setText(f"正在下载: {target_name} ({percent}%)")
+            p_data["bar"].setValue(percent)
+            
+            # 当达到100%时，为了平滑体验，稍微停留一下再重置/隐藏
+            if percent >= 100:
+                # 不立刻隐藏，等成功状态再隐藏，但可以将文本变为完成状态
+                p_data["label"].setText(f"下载完成: {target_name}")
 
 
 # --- 错误展示组件 (嵌入式) ---
@@ -428,6 +505,9 @@ class AgentsWorkgroupThread(QThread):
     create_msg_bar_signal = pyqtSignal(str)
     refresh_map_canvas_signal = pyqtSignal()
 
+    # 下载进度信号: target_name, percent
+    download_progress_signal = pyqtSignal(str, int)
+
     execute_project_signal = pyqtSignal(str, dict)
     # 用于传递布局任务列表的信号
     layout_task_signal = pyqtSignal(list)
@@ -440,6 +520,7 @@ class AgentsWorkgroupThread(QThread):
         self.layers = layers
         # 用于接收主线程执行结果的变量
         self.project_op_result = None
+        self.layout_op_result = None
         self._is_stopped = False
         self.execution_log = [] # 记录执行日志用于总结
 
@@ -461,13 +542,24 @@ class AgentsWorkgroupThread(QThread):
             self.msleep(50)
         return self.project_op_result
 
+    def emit_download_progress(self, target_name: str, percent: int):
+        """发送下载进度信号"""
+        self.download_progress_signal.emit(target_name, percent)
+
     def execute_layout_op(self, tasks):
         """执行布局操作（需在主线程运行）"""
+        self.layout_op_result = None
         if self._is_stopped: return "任务已停止"
         
         # 发送布局任务信号
         self.layout_task_signal.emit(tasks)
-        return "布局任务已发送至主线程执行。"
+        
+        # 简单自旋锁等待主线程执行完成并获取结果
+        while self.layout_op_result is None:
+            if self._is_stopped: return "任务已停止"
+            self.msleep(50)
+            
+        return self.layout_op_result
         
     def refresh_layers(self):
         """刷新并返回最新的图层列表"""
@@ -530,7 +622,8 @@ class AgentsWorkgroupThread(QThread):
 
         try:
             # 使用 stream 模式运行
-            for event in app.stream(inputs):
+            config = {"recursion_limit": 150}
+            for event in app.stream(inputs, config=config):
                 if self._is_stopped:
                     self.message_signal.emit("用户已手动停止流程。", "ai", "text")
                     return
@@ -738,6 +831,7 @@ class ChatBox(QObject):
         self.agents_workgroup.refresh_map_canvas_signal.connect(self.refresh_map_canvas)
         self.agents_workgroup.execute_project_signal.connect(self.handle_project_execution)
         self.agents_workgroup.layout_task_signal.connect(self.handle_layout_tasks)
+        self.agents_workgroup.download_progress_signal.connect(self.handle_download_progress)
 
         self.agents_workgroup.start()
 
@@ -753,6 +847,11 @@ class ChatBox(QObject):
         self.agents_workgroup = None
         self.current_step_widget = None
 
+    def handle_download_progress(self, target_name: str, percent: int):
+        """处理子线程发来的下载进度，交由对应的进度组件处理"""
+        if self.current_step_widget:
+            self.current_step_widget.update_download_progress(target_name, percent)
+
     def handle_project_execution(self, source_type, params):
         try:
             result = execute_project_task(source_type, params)
@@ -767,7 +866,11 @@ class ChatBox(QObject):
             res_msg = execute_layout_task(req)
             results.append(res_msg)
         final_msg = " | ".join(results)
-        # 布局任务通常是最后一步，这里不直接发消息，让线程流程控制
+        
+        # 布局任务通常是最后一步，我们将结果写回给工作线程，方便后续处理或错误捕获
+        if self.agents_workgroup:
+            self.agents_workgroup.layout_op_result = final_msg
+        
         self.refresh_map_canvas()
 
     def receive_ai_message(self, text, sender, msg_type="text"):
@@ -792,7 +895,48 @@ class ChatBox(QObject):
         # 兼容旧信号，改为直接添加 Widget
         self.add_error_widget(report)
 
+    def auto_sort_layers(self):
+        """
+        自动排序图层树，将点图层放在最上面，线图层居中，面图层靠下，栅格最底层。
+        """
+        from qgis.core import QgsProject, QgsMapLayerType, QgsWkbTypes
+        root = QgsProject.instance().layerTreeRoot()
+        
+        def get_weight(node):
+            if hasattr(node, 'layer') and node.layer():
+                layer = node.layer()
+                if layer.type() == QgsMapLayerType.VectorLayer:
+                    geom_type = layer.geometryType()
+                    if geom_type == QgsWkbTypes.PointGeometry:
+                        return 1
+                    elif geom_type == QgsWkbTypes.LineGeometry:
+                        return 2
+                    elif geom_type == QgsWkbTypes.PolygonGeometry:
+                        return 3
+                    else:
+                        return 4
+                elif layer.type() == QgsMapLayerType.RasterLayer:
+                    return 5
+            return 10
+            
+        children = root.children()
+        if not children:
+            return
+            
+        nodes_with_weight = [(get_weight(node), i, node) for i, node in enumerate(children)]
+        sorted_nodes = sorted(nodes_with_weight, key=lambda x: (x[0], x[1]))
+        
+        is_sorted = all(nodes_with_weight[i] == sorted_nodes[i] for i in range(len(children)))
+        if is_sorted:
+            return
+            
+        for _, _, node in sorted_nodes:
+            clone = node.clone()
+            root.addChildNode(clone)
+            root.removeChildNode(node)
+
     def refresh_map_canvas(self):
+        self.auto_sort_layers()
         if iface and iface.mapCanvas():
             iface.mapCanvas().refresh()
 
