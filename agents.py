@@ -84,7 +84,7 @@ def fuzzy_match(input_name: str, available_names: List[str]) -> str or None:
 
 
 # --- 核心执行函数 (Agent A) ---
-def run_agent_a(user_text: str) -> Dict[str, Any]:
+def run_agent_a(user_text: str, progress_callback=None) -> Dict[str, Any]:
     """
         Agent A 的核心逻辑：调用 LLM 解析数据获取任务，并执行数据获取。
     """
@@ -114,33 +114,41 @@ def run_agent_a(user_text: str) -> Dict[str, Any]:
         return {"is_process_complete": False,
                 "possible_problem": f"LLM返回的JSON格式错误。原始内容: {json_content[:100]}..."}
 
-    if isinstance(fetch_request, list):
-        if len(fetch_request) > 0:
-            # 暂时只取第一个任务执行
-            fetch_request = fetch_request[0]
+    # 统一将结果包装为列表以支持多任务执行
+    if not isinstance(fetch_request, list):
+        fetch_request = [fetch_request]
+        
+    if len(fetch_request) == 0:
+        return {"is_process_complete": False, "possible_problem": "AI返回了空的任务列表。"}
+
+    results = []
+    layer_names = []
+
+    for req in fetch_request:
+        # 检查 LLM 是否返回了错误消息
+        if "error_message" in req:
+            return {"is_process_complete": False, "possible_problem": req["error_message"]}
+
+        source_type = req.get("source_type")
+        query_params = req.get("query_params", {})
+
+        if not source_type or not query_params:
+            return {"is_process_complete": False, "possible_problem": "JSON缺少关键参数 (source_type/query_params)。"}
+            
+        QgsMessageLog.logMessage(f"数据查询任务参数:{req}", tag='AI_AGENT_DEBUG', level=Qgis.Info)
+
+        # 调用实际执行函数
+        fetch_result = execute_fetch_task(source_type, query_params, progress_callback)
+
+        if fetch_result.startswith("Success"):
+            target_name = query_params.get('target_name', '新图层')
+            results.append(fetch_result)
+            layer_names.append(target_name)
         else:
-            return {"is_process_complete": False, "possible_problem": "AI返回了空的任务列表。"}
+            return {"is_process_complete": False, "possible_problem": fetch_result.replace("Error: ", "")}
 
-    # 检查 LLM 是否返回了错误消息
-    if "error_message" in fetch_request:
-        return {"is_process_complete": False, "possible_problem": fetch_request["error_message"]}
-
-    source_type = fetch_request.get("source_type")
-    query_params = fetch_request.get("query_params", {})
-
-    if not source_type or not query_params:
-        return {"is_process_complete": False, "possible_problem": "JSON缺少关键参数 (source_type/query_params)。"}
-    QgsMessageLog.logMessage(f"数据查询任务参数:{fetch_request}", tag='AI_AGENT_DEBUG', level=Qgis.Info)
-
-    # 调用实际执行函数
-    fetch_result = execute_fetch_task(source_type, query_params)
-
-    if fetch_result.startswith("Success"):
-        target_name = query_params.get('target_name', '新图层')
-        # 将结果返回给 chat_box
-        return {"is_process_complete": True, "tool_result": fetch_result, "layer_name": target_name}
-    else:
-        return {"is_process_complete": False, "possible_problem": fetch_result.replace("Error: ", "")}
+    # 所有任务执行成功后返回汇总结果
+    return {"is_process_complete": True, "tool_result": " | ".join(results), "layer_name": ", ".join(layer_names)}
 
 
 # --- 核心执行函数 (Agent B) ---
@@ -210,11 +218,24 @@ def run_agent_b(user_text: str, layers: List[QgsMapLayer]) -> Dict[str, Any]:
                 # 再次模糊匹配确认图层名 (防止用户输入简称)
                 matched_del_name = fuzzy_match(del_target, available_names)
                 if matched_del_name:
-                    # 从项目中查找并移除
+                    # 获取当前项目中该名称的所有图层
                     layers_to_del = current_project.mapLayersByName(matched_del_name)
                     if layers_to_del:
-                        current_project.removeMapLayers([l.id() for l in layers_to_del])
-                        deleted_log.append(matched_del_name)
+                        # 避免误删刚刚生成的新图层
+                        # 找出新生成的图层ID（如果有）
+                        new_layer_name = matched_params.get("CUSTOM_LAYER_NAME")
+                        
+                        ids_to_remove = []
+                        for l in layers_to_del:
+                            ids_to_remove.append(l.id())
+                            
+                        if new_layer_name == matched_del_name and len(layers_to_del) > 1:
+                            # 如果新图层名字和要删除的图层名字一样，且项目中有多个同名图层，则不删除最新图层。
+                            ids_to_remove.pop() # 移除列表最后一个（即新图层）的ID
+                            
+                        if ids_to_remove:
+                            current_project.removeMapLayers(ids_to_remove)
+                            deleted_log.append(matched_del_name)
 
         # 构造最终返回信息
         final_msg = analysis_result
@@ -247,10 +268,12 @@ def run_agent_c(user_text: str, layers: List[QgsMapLayer]) -> dict:
     
     try:
         extract_sys_prompt = (
-            "你是一个GIS助手。请根据用户输入和可用图层列表，提取用户想要操作的目标图层名称，并推断其地理语义关键词（中文）。\n"
-            "即使图层名是英文，也请推断其对应的中文地理含义（如 'River' -> '河流'）。\n"
+            "你是一个GIS助手。请根据用户输入和可用图层列表，提取用户想要操作的目标图层名称，并推断其高度概括的、标准的泛化地理语义（中文）。\n"
+            "重要：为了与标准样式库匹配，请去除具体的行政区划或地名修饰词，提取其核心地理要素类别。\n"
+            "特别注意：如果用户的指令是给图层“添加注记/标记/标签”，请务必在地理语义后加上“注记”。如果不是，严禁添加。\n"
+            "例如：'给湖北省河流配置样式' -> '河流'；'给湖北省河流添加注记' -> '河流注记'；'湖北省省界' -> '省级行政区界线'；'湖北省DEM' -> 'DEM'。\n"
             "请仅返回标准的 JSON 格式，不要包含 Markdown 标记或其他文本：\n"
-            "{\"target_layer_name\": \"精确匹配的图层名称\", \"content_inference\": \"语义关键词\"}"
+            "{\"target_layer_name\": \"精确匹配的图层名称\", \"content_inference\": \"泛化的地理语义关键词\"}"
         )
         extract_input = f"{extract_sys_prompt}\n\n用户输入: {user_text}\n可用图层列表: {available_names}"
         extract_res = call_qwen_with_prompt(extract_input).strip()
@@ -468,7 +491,9 @@ def run_agent_e(user_text: str, layers: List[QgsMapLayer]) -> Dict[str, Any]:
 
         try:
             requests = json.loads(json_content)
+            QgsMessageLog.logMessage(f"Agent E JSON Output: {json.dumps(requests, ensure_ascii=False)}", tag='AI_AGENT_DEBUG', level=Qgis.Info)
         except json.JSONDecodeError:
+            QgsMessageLog.logMessage(f"Agent E JSON Decode Error: {json_content}", tag='AI_AGENT_DEBUG', level=Qgis.Warning)
             return {"is_process_complete": False, "possible_problem": f"JSON解析失败: {json_content}"}
 
         if isinstance(requests, dict): requests = [requests]

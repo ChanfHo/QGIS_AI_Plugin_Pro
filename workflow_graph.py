@@ -119,7 +119,7 @@ def agent_executor_node(state: GraphState):
     
     try:
         if agent == "agent_a":
-            result = run_agent_a(task)
+            result = run_agent_a(task, progress_callback=executor.emit_download_progress if executor else None)
         elif agent == "agent_b":
             result = run_agent_b(task, layers)
         elif agent == "agent_c":
