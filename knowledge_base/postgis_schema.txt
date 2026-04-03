@@ -1,20 +1,20 @@
 目前数据库(qgis_ai_plugin_db)中包含以下数据表。当用户请求获取云端/数据库中的空间数据时，请根据以下结构生成 SQL 查询。
-所有表的空间几何列均为 `geom`，主键均为 `gid`。
+所有表的空间几何列均为 `geom`。
 
-1. 表名: `china_province` (省级行政区划边界)
+1. 表名: `china_province` (省级行政区划边界，以面状数据存储)
    - `gid` (serial): 主键
    - `province` (text): 省份名称 (如 '湖北省', '北京市')
    - `code` (text): 行政代码
    - `geom` (geometry): 空间几何数据
 
-2. 表名: `china_city` (市级行政区划边界)
+2. 表名: `china_city` (市级行政区划边界，以面状数据存储)
    - `gid` (serial): 主键
    - `province` (text): 省份名称
    - `city` (text): 城市名称 (如 '武汉市', '深圳市')
    - `code` (text): 行政代码
    - `geom` (geometry): 空间几何数据
 
-3. 表名: `china_county` (县区级行政区划边界)
+3. 表名: `china_county` (县区级行政区划边界，以面状数据存储)
    - `gid` (serial): 主键
    - `province` (text): 省份名称
    - `city` (text): 城市名称
@@ -22,4 +22,36 @@
    - `code` (text): 行政代码
    - `geom` (geometry): 空间几何数据
 
+4. 表名: `water_line` (线状水系)
+  - `gid` (serial): 主键
+  - `name` (text): 水系名称
+  - `level` (text): 水系等级
+  - `length_km` (double): 水系长度
+  - `province` (text[]): 水系途径省份名称列表
+  - `adcode` (text[]): 水系途径省份代码列表
+  - `geom` (geometry): 空间几何数据
+
+5. 表名: `water_polygon` (面状水系)
+  - `gid` (serial): 主键
+  - `name` (text): 水系名称
+  - `level` (text): 水系等级
+  - `area_km2` (double): 水系面积
+  - `province` (text[]): 水系途径省份名称列表
+  - `adcode` (text[]): 水系途径省份代码列表
+  - `geom` (geometry): 空间几何数据
+
+6. 表名: `china_dem_index` (各省份DEM存储路径索引表)
+  - `id` (serial): 主键
+  - `province` (text): 省份名称
+  - `adcode` (text): 省份代码
+  - `dir_path` (text): DEM文件存储路径
+
+7. 表名: `china_admin_center` (全国市县级行政中心点，点状数据)
+  - `gid` (serial): 主键
+  - `name` (text): 名称
+  - `adcode` (text): 行政代码
+  - `level` (text): 行政等级编码：1-市级、2-县区级
+  - `province` (text): 所属省份名称
+  - `city` (text): 所属城市名称
+  - `geom` (geometry): 空间几何数据
 (注：未来如有新表添加，其结构将在此处继续列出。请严格只查询上述已知的表。)
