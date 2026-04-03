@@ -25,13 +25,7 @@ def execute_geoprocessing_task(alg_id: str, params: Dict[str, Any]) -> str:
     # 1. 提取自定义图层名称
     target_layer_name = exec_params.pop('CUSTOM_LAYER_NAME', f"result_{alg_id.split(':')[-1]}")
 
-    # 2. 清理同名旧图层
-    existing_layers = project.mapLayersByName(target_layer_name)
-    if existing_layers:
-        project.removeMapLayers([l.id() for l in existing_layers])
-        QgsMessageLog.logMessage(f"已移除同名旧图层: {target_layer_name}", tag='AI_AGENT_DEBUG', level=Qgis.Info)
-
-    # 3. 转换图层名称字符串为 QgsMapLayer 对象
+    # 2. 转换图层名称字符串为 QgsMapLayer 对象
     # 遍历参数，识别所有需要图层对象的地方
     for k, v in exec_params.items():
         # 如果值是字符串，并且键名可能代表一个图层输入
@@ -42,39 +36,58 @@ def execute_geoprocessing_task(alg_id: str, params: Dict[str, Any]) -> str:
                 return f"Error: 找不到名为 '{v}' 的输入图层。"
             exec_params[k] = layer_obj  # 替换为 QgsMapLayer 对象
 
-    # 4. 指定输出目标
-    # 查找算法的输出参数名，并将其设置为 'memory:'
+    # 3. 指定输出目标
+    # 查找算法的输出参数名，并将其设置为 'memory:' (矢量) 或 'TEMPORARY_OUTPUT' (栅格)
     output_param_name = 'OUTPUT'  # 默认输出参数名
+    is_raster_output = False
 
     # 尝试更准确地获取输出参数名（处理如 'DISSOLVE' 算法可能使用 'OUTPUT'）
     try:
         alg = processing.algorithmFromString(alg_id)
         if alg:
             for param in alg.outputParameters():
-                # 寻找矢量图层输出
-                if param.type() in [param.Type.MapLayer, param.Type.VectorLayer]:
+                # 寻找输出参数
+                if param.type() in [param.Type.MapLayer, param.Type.VectorLayer, param.Type.RasterLayer]:
                     output_param_name = param.name()
+                    if param.type() == param.Type.RasterLayer or alg_id.startswith('gdal:'):
+                        is_raster_output = True
                     break
     except Exception:
-        pass  # 无法解析算法ID，使用默认 'OUTPUT'
+        if alg_id.startswith('gdal:'):
+             is_raster_output = True
 
     # 如果是原地修改数据的算法 (如字段计算器，它将输入图层作为输出)，则不使用 'memory:'
     # 而是让它默认修改 'INPUT' 图层（如果算法支持）
     is_inplace_mod = alg_id.endswith('fieldcalculator')
 
     if not is_inplace_mod:
-        exec_params[output_param_name] = 'memory:'
+        if is_raster_output:
+            # GDAL 算法处理栅格数据不能输出为 memory:，需要指定为 'TEMPORARY_OUTPUT'
+            exec_params[output_param_name] = 'TEMPORARY_OUTPUT'
+        else:
+            exec_params[output_param_name] = 'memory:'
 
-    # 5. 执行算法
+    # 4. 执行算法
     try:
         result = processing.run(alg_id, exec_params)
 
         # 6. 处理输出结果
         if output_param_name in result and not is_inplace_mod:
             # 处理生成新图层的算法
-            output_layer = result[output_param_name]
+            output_layer_path = result[output_param_name]
+            
+            output_layer = None
+            if isinstance(output_layer_path, QgsMapLayer):
+                output_layer = output_layer_path
+            elif isinstance(output_layer_path, str):
+                # 针对栅格TEMPORARY_OUTPUT或特定输出，会返回文件路径
+                if is_raster_output:
+                    from qgis.core import QgsRasterLayer
+                    output_layer = QgsRasterLayer(output_layer_path, target_layer_name)
+                else:
+                    output_layer = QgsVectorLayer(output_layer_path, target_layer_name, "ogr")
 
-            if output_layer and isinstance(output_layer, QgsMapLayer):
+            if output_layer and output_layer.isValid():
                 project.addMapLayer(output_layer, True)
                 output_layer.setName(target_layer_name)
 
@@ -85,8 +98,7 @@ def execute_geoprocessing_task(alg_id: str, params: Dict[str, Any]) -> str:
 
                 return f"Success: 空间分析 '{alg_id.split(':')[-1]}' 成功执行，已生成新图层 '{target_layer_name}'。"
             else:
-                # 理论上不会发生，除非 output_param_name 错误
-                return f"Success: 算法 '{alg_id}' 执行成功，但返回的输出对象不是 QgsMapLayer。"
+                return f"Error: 算法 '{alg_id}' 执行成功，但无法加载输出图层（格式无效或损坏）。"
 
         else:
             # 处理原地修改的算法 (例如 fieldcalculator, 或统计类算法)
